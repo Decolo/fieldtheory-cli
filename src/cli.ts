@@ -351,6 +351,7 @@ export function buildCli() {
     .option('--api', 'Use OAuth v2 API instead of Chrome session', false)
     .option('--rebuild', 'Full re-crawl of all bookmarks', false)
     .option('--gaps', 'Backfill missing data (quoted tweets, truncated articles)', false)
+    .option('--yes', 'Skip confirmation prompts', false)
     .option('--classify', 'Classify new bookmarks with LLM after syncing', false)
     .option('--max-pages <n>', 'Max pages to fetch', (v: string) => Number(v), 500)
     .option('--target-adds <n>', 'Stop after N new bookmarks', (v: string) => Number(v))
@@ -395,6 +396,33 @@ export function buildCli() {
             }
           }
           return;
+        }
+
+        // ── rebuild confirmation ──
+        if (options.rebuild) {
+          const dir = dataDir();
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+          const backupDir = `${dir}-backup-${timestamp}`;
+
+          console.log(`  \u26a0 Rebuild will re-crawl all bookmarks from X.`);
+          console.log(`  Your existing data will be merged (not deleted), but`);
+          console.log(`  this is a full re-sync and may take a while.\n`);
+          console.log(`  To back up first, run:`);
+          console.log(`    cp -r ${dir} ${backupDir}\n`);
+
+          // Allow --yes to skip confirmation
+          if (!options.yes) {
+            const rl = await import('node:readline');
+            const prompt = rl.createInterface({ input: process.stdin, output: process.stdout });
+            const answer = await new Promise<string>((resolve) => {
+              prompt.question('  Continue? (y/N) ', resolve);
+            });
+            prompt.close();
+            if (answer.trim().toLowerCase() !== 'y') {
+              console.log('  Aborted.');
+              return;
+            }
+          }
         }
 
         const useApi = Boolean(options.api);
