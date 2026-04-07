@@ -9,6 +9,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadPreferences, savePreferences } from './preferences.js';
+import { PromptCancelledError, promptText } from './prompt.js';
 
 // ── Engine registry ────────────────────────────────────────────────────
 
@@ -68,14 +69,14 @@ export function detectAvailableEngines(): string[] {
 // ── Interactive prompt ─────────────────────────────────────────────────
 
 async function askYesNo(question: string): Promise<boolean> {
-  const { createInterface } = await import('node:readline');
-  return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stderr });
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase().startsWith('y'));
-    });
-  });
+  const result = await promptText(question);
+  if (result.kind === 'interrupt') {
+    throw new PromptCancelledError('Cancelled before selecting a model.', 130);
+  }
+  if (result.kind === 'close') {
+    throw new PromptCancelledError('No model selected.', 0);
+  }
+  return result.value.toLowerCase().startsWith('y');
 }
 
 // ── Resolution ─────────────────────────────────────────────────────────

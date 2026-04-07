@@ -22,6 +22,7 @@ import { formatClassificationSummary } from './bookmark-classify.js';
 import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
 import { resolveEngine, detectAvailableEngines } from './engine.js';
 import { loadPreferences, savePreferences } from './preferences.js';
+import { PromptCancelledError, promptText } from './prompt.js';
 import { renderViz } from './bookmarks-viz.js';
 import { listBrowserIds } from './browsers.js';
 import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath } from './paths.js';
@@ -325,6 +326,11 @@ function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promis
     try {
       await fn(...args);
     } catch (err) {
+      if (err instanceof PromptCancelledError) {
+        console.log(`\n  ${err.message}\n`);
+        process.exitCode = err.exitCode;
+        return;
+      }
       const msg = (err as Error).message;
       console.error(`\n  Error: ${msg}\n`);
       process.exitCode = 1;
@@ -478,13 +484,11 @@ export function buildCli() {
 
           // Allow --yes to skip confirmation
           if (!options.yes) {
-            const rl = await import('node:readline');
-            const prompt = rl.createInterface({ input: process.stdin, output: process.stdout });
-            const answer = await new Promise<string>((resolve) => {
-              prompt.question('  Continue? (y/N) ', resolve);
-            });
-            prompt.close();
-            if (answer.trim().toLowerCase() !== 'y') {
+            const answer = await promptText('  Continue? (y/N) ', { output: process.stdout });
+            if (answer.kind === 'interrupt') {
+              throw new PromptCancelledError('Cancelled. Rebuild aborted.', 130);
+            }
+            if (answer.kind !== 'answer' || answer.value.toLowerCase() !== 'y') {
               console.log('  Aborted.');
               return;
             }
@@ -817,17 +821,20 @@ export function buildCli() {
         return;
       }
 
-      const readline = await import('node:readline');
-      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-      const answer = await new Promise<string>((resolve) => {
-        rl.question('  Select default: ', (a) => { rl.close(); resolve(a.trim().toLowerCase()); });
-      });
+      const answer = await promptText('  Select default: ');
+      if (answer.kind === 'interrupt') {
+        throw new PromptCancelledError('Cancelled. No default model saved.', 130);
+      }
+      if (answer.kind === 'close' || !answer.value) {
+        console.log('  No default model saved.');
+        return;
+      }
 
-      if (available.includes(answer)) {
-        savePreferences({ ...prefs, defaultEngine: answer });
-        console.log(`  \u2713 Default model set to ${answer}`);
-      } else if (answer) {
-        console.log(`  "${answer}" is not available. Found: ${available.join(', ')}`);
+      if (available.includes(answer.value)) {
+        savePreferences({ ...prefs, defaultEngine: answer.value });
+        console.log(`  \u2713 Default model set to ${answer.value}`);
+      } else {
+        console.log(`  "${answer.value}" is not available. Found: ${available.join(', ')}`);
         process.exitCode = 1;
       }
     }));
