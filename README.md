@@ -10,7 +10,7 @@ Free and open source. Designed for Mac.
 npm install -g fieldtheory
 ```
 
-Requires Node.js 20+ and Google Chrome.
+Requires Node.js 20+. Chrome recommended for session sync; OAuth available for all platforms.
 
 ## Quick start
 
@@ -49,12 +49,40 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | `ft auth` | Set up OAuth for API-based sync (optional) |
 | `ft sync --api` | Sync via OAuth API (cross-platform) |
 | `ft fetch-media` | Download media assets (static images only) |
+| `ft md` | Export bookmarks as individual markdown files |
+| `ft wiki` | Compile a Karpathy-style interlinked knowledge base from bookmarks |
+| `ft wiki ask <question>` | Ask questions against the knowledge base |
+| `ft wiki lint` | Health-check the wiki for broken links and missing pages |
+| `ft wiki lint --fix` | Auto-fix fixable wiki issues |
+| `ft skill install` | Install `/fieldtheory` skill for Claude Code and Codex |
+| `ft skill show` | Print skill content to stdout |
+| `ft skill uninstall` | Remove installed skill files |
+| `ft model` | Set or change the default LLM engine |
 | `ft status` | Show sync status and data location |
 | `ft path` | Print data directory path |
 
+## Knowledge base
+
+Turn your bookmarks into an interlinked markdown wiki:
+
+```bash
+ft wiki              # Compile knowledge base (categories, domains, entities, concepts)
+ft wiki ask "What AI tools have I been saving?"
+ft wiki lint --fix   # Fix broken links and orphan pages
+ft md                # Export as flat markdown files
+```
+
+The wiki uses LLM synthesis to produce category pages, domain overviews, entity profiles, and concept maps — all cross-linked. Incremental compilation with resume on Ctrl-C.
+
 ## Agent integration
 
-Now you can ask your agent:
+Install the `/fieldtheory` skill so your agent automatically searches your bookmarks when relevant:
+
+```bash
+ft skill install     # Auto-detects Claude Code and Codex
+```
+
+Then ask your agent:
 
 > "What have I bookmarked about cancer research in the last three years and how has it progressed?"
 
@@ -62,7 +90,7 @@ Now you can ask your agent:
 
 > "Every day please sync any new X bookmarks using the Field Theory CLI."
 
-Works with Claude Code, Codex, or any agent with shell access. Just tell your agent to use the `ft` CLI.
+Works with Claude Code, Codex, or any agent with shell access.
 
 ## Scheduling
 
@@ -84,6 +112,7 @@ All data is stored locally at `~/.ft-bookmarks/`:
   bookmarks.db            # SQLite FTS5 search index
   bookmarks-meta.json     # sync metadata
   oauth-token.json        # OAuth token (if using API mode, chmod 600)
+  md/                     # markdown knowledge base (ft wiki / ft md)
 ```
 
 Override the location with `FT_DATA_DIR`:
@@ -112,11 +141,11 @@ Use `ft classify` for LLM-powered classification that catches what regex misses.
 
 | Feature | macOS | Linux | Windows |
 |---------|-------|-------|---------|
-| Chrome session sync (`ft sync`) | Yes | No* | No* |
+| Session sync (`ft sync`) | Chrome, Brave, Arc, Firefox | Firefox | Firefox |
 | OAuth API sync (`ft sync --api`) | Yes | Yes | Yes |
-| Search, list, classify, viz | Yes | Yes | Yes |
+| Search, list, classify, viz, wiki | Yes | Yes | Yes |
 
-\*Chrome session extraction uses macOS Keychain. On other platforms, use `ft auth` + `ft sync --api`.
+Session sync extracts cookies from your browser's local database. Use `ft sync --browser <name>` to pick a browser. On platforms where session sync isn't available, use `ft auth` + `ft sync --api`.
 
 ## Security
 
