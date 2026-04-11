@@ -76,12 +76,48 @@ export interface BookmarkRecord {
   ingestedVia?: 'api' | 'browser' | 'graphql';
 }
 
+export interface LikeRecord {
+  id: string;
+  tweetId: string;
+  authorHandle?: string;
+  authorName?: string;
+  authorProfileImageUrl?: string;
+  author?: BookmarkAuthorSnapshot;
+  url: string;
+  text: string;
+  postedAt?: string | null;
+  likedAt?: string | null;
+  syncedAt: string;
+  conversationId?: string;
+  inReplyToStatusId?: string;
+  inReplyToUserId?: string;
+  quotedStatusId?: string;
+  quotedTweet?: QuotedTweetSnapshot;
+  language?: string;
+  sourceApp?: string;
+  possiblySensitive?: boolean;
+  engagement?: BookmarkEngagementSnapshot;
+  media?: string[];
+  mediaObjects?: BookmarkMediaObject[];
+  links?: string[];
+  tags?: string[];
+  ingestedVia?: 'browser' | 'graphql';
+}
+
 export interface BookmarkCacheMeta {
   provider: 'twitter';
   schemaVersion: number;
   lastFullSyncAt?: string;
   lastIncrementalSyncAt?: string;
   totalBookmarks: number;
+}
+
+export interface LikesCacheMeta {
+  provider: 'twitter';
+  schemaVersion: number;
+  lastFullSyncAt?: string;
+  lastIncrementalSyncAt?: string;
+  totalLikes: number;
 }
 
 export interface XOAuthTokenSet {
@@ -94,6 +130,16 @@ export interface XOAuthTokenSet {
 }
 
 export interface BookmarkBackfillState {
+  provider: 'twitter';
+  lastRunAt?: string;
+  totalRuns: number;
+  totalAdded: number;
+  lastAdded: number;
+  lastSeenIds: string[];
+  stopReason?: string;
+}
+
+export interface LikesBackfillState {
   provider: 'twitter';
   lastRunAt?: string;
   totalRuns: number;
