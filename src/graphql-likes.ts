@@ -3,6 +3,7 @@ import { ensureDataDir, twitterLikesBackfillStatePath, twitterLikesCachePath, tw
 import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
 import { extractFirefoxXCookies } from './firefox-cookies.js';
+import { fetchXResource } from './x-graphql.js';
 import type { LikeRecord, LikesBackfillState, LikesCacheMeta } from './types.js';
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
@@ -386,7 +387,7 @@ function updateState(
 }
 
 async function fetchViewerId(csrfToken: string, cookieHeader?: string): Promise<string> {
-  const response = await fetch(buildViewerUrl(), { headers: buildHeaders(csrfToken, cookieHeader) });
+  const response = await fetchXResource(buildViewerUrl(), { headers: buildHeaders(csrfToken, cookieHeader) });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`Viewer lookup failed (${response.status}).\nResponse: ${text.slice(0, 300)}`);
@@ -403,7 +404,7 @@ async function fetchPageWithRetry(csrfToken: string, userId: string, cursor?: st
   let lastError: Error | undefined;
 
   for (let attempt = 0; attempt < 4; attempt++) {
-    const response = await fetch(buildUrl(userId, cursor), { headers: buildHeaders(csrfToken, cookieHeader) });
+    const response = await fetchXResource(buildUrl(userId, cursor), { headers: buildHeaders(csrfToken, cookieHeader) });
     if (response.status === 429) {
       const waitSec = Math.min(15 * Math.pow(2, attempt), 120);
       lastError = new Error(`Rate limited (429) on attempt ${attempt + 1}`);

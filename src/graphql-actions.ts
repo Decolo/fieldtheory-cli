@@ -1,4 +1,4 @@
-import { buildGraphqlUrl, buildXGraphqlHeaders, resolveXSessionAuth, type XSessionOptions } from './x-graphql.js';
+import { buildGraphqlUrl, buildXGraphqlHeaders, fetchXResource, resolveXSessionAuth, type XSessionOptions } from './x-graphql.js';
 
 interface MutationSpec {
   queryId: string;
@@ -43,7 +43,7 @@ async function runMutation(
   options: XSessionOptions = {},
 ): Promise<RemoteTweetActionResult> {
   const session = resolveXSessionAuth(options);
-  const response = await fetch(buildGraphqlUrl(spec.queryId, spec.operationName), {
+  const response = await fetchXResource(buildGraphqlUrl(spec.queryId, spec.operationName), {
     method: 'POST',
     headers: buildXGraphqlHeaders(session),
     body: JSON.stringify({

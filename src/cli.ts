@@ -3,9 +3,11 @@ import { Command } from 'commander';
 import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { getLikesStatusView, formatLikesStatus } from './likes-service.js';
+import { getFeedStatusView, formatFeedStatus } from './feed-service.js';
 import { runTwitterOAuthFlow } from './xauth.js';
 import { syncBookmarksGraphQL, syncGaps } from './graphql-bookmarks.js';
 import { syncLikesGraphQL, type LikesSyncProgress } from './graphql-likes.js';
+import { syncFeedGraphQL, type FeedSyncProgress } from './graphql-feed.js';
 import { unlikeTweet, unbookmarkTweet } from './graphql-actions.js';
 import type { SyncProgress, GapFillProgress } from './graphql-bookmarks.js';
 import { fetchBookmarkMediaBatch } from './bookmark-media.js';
@@ -28,6 +30,7 @@ import {
   getLikeById,
   formatLikeSearchResults,
 } from './likes-db.js';
+import { listFeed, getFeedById } from './feed-db.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
 import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
 import { resolveEngine, detectAvailableEngines } from './engine.js';
@@ -43,9 +46,11 @@ import {
   dataDir,
   ensureDataDir,
   isFirstRun,
+  isFeedFirstRun,
   isLikesFirstRun,
   twitterBookmarksIndexPath,
   twitterBackfillStatePath,
+  twitterFeedIndexPath,
   twitterLikesIndexPath,
   mdDir,
 } from './paths.js';
@@ -109,6 +114,8 @@ const FRIENDLY_STOP_REASONS: Record<string, string> = {
   'caught up to newest stored bookmark': 'All caught up \u2014 no new bookmarks since last sync.',
   'no new bookmarks (stale)': 'Sync complete \u2014 reached the end of new bookmarks.',
   'end of bookmarks': 'Sync complete \u2014 all bookmarks fetched.',
+  'end of feed': 'Sync complete \u2014 all requested feed pages fetched.',
+  'no tweet entries found': 'Sync complete \u2014 no supported tweet entries were returned.',
   'max runtime reached': 'Paused after 30 minutes. Run again to continue.',
   'max pages reached': 'Paused after reaching page limit. Run again to continue.',
   'target additions reached': 'Reached target bookmark count.',
@@ -390,6 +397,33 @@ function requireLikesIndex(): boolean {
   Likes search index not built yet.
 
   Run: ft likes index
+`);
+    process.exitCode = 1;
+    return false;
+  }
+  return true;
+}
+
+function requireFeedData(): boolean {
+  if (isFeedFirstRun()) {
+    console.log(`
+  No feed items synced yet.
+
+  Run: ft feed sync
+`);
+    process.exitCode = 1;
+    return false;
+  }
+  return true;
+}
+
+function requireFeedIndex(): boolean {
+  if (!requireFeedData()) return false;
+  if (!fs.existsSync(twitterFeedIndexPath())) {
+    console.log(`
+  Feed index not built yet.
+
+  Run: ft feed sync
 `);
     process.exitCode = 1;
     return false;
@@ -1401,6 +1435,125 @@ export function buildCli() {
       process.stderr.write('Building likes search index...\n');
       const result = await buildLikesIndex({ force: Boolean(options.force) });
       console.log(`Indexed ${result.recordCount} likes (${result.newRecords} new) → ${result.dbPath}`);
+    }));
+
+  // ── feed ───────────────────────────────────────────────────────────────
+
+  const feed = program
+    .command('feed')
+    .description('Sync and browse your X Home timeline as a local read-only archive');
+
+  feed
+    .command('sync')
+    .description('Fetch Home timeline tweets from X into your local feed archive')
+    .option('--max-pages <n>', 'Max pages to fetch', (v: string) => Number(v), 5)
+    .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
+    .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 5)
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (options) => {
+      const firstRun = isFeedFirstRun();
+      if (firstRun) showSyncWelcome();
+      ensureDataDir();
+
+      const startTime = Date.now();
+      let lastSync: FeedSyncProgress = { page: 0, totalFetched: 0, newAdded: 0, skippedEntries: 0, running: true, done: false };
+      const spinner = createSpinner(() => {
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        return `Syncing feed...  ${lastSync.newAdded} new  │  ${lastSync.skippedEntries} skipped  │  page ${lastSync.page}  │  ${elapsed}s`;
+      });
+
+      let csrfToken: string | undefined;
+      let cookieHeader: string | undefined;
+      if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
+        csrfToken = String(options.cookies[0]);
+        const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+        const parts = [`ct0=${csrfToken}`];
+        if (authToken) parts.push(`auth_token=${authToken}`);
+        cookieHeader = parts.join('; ');
+      }
+
+      const result = await runWithSpinner(spinner, () => syncFeedGraphQL({
+        maxPages: Number(options.maxPages) || 5,
+        delayMs: Number(options.delayMs) || 600,
+        maxMinutes: Number(options.maxMinutes) || 5,
+        browser: options.browser ? String(options.browser) : undefined,
+        csrfToken,
+        cookieHeader,
+        chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+        chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+        firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+        onProgress: (status: FeedSyncProgress) => {
+          lastSync = status;
+          spinner.update();
+        },
+      }));
+
+      console.log(`\n  ✓ ${result.added} new feed items synced (${result.totalItems} total)`);
+      console.log(`  Skipped non-tweet entries: ${result.skippedEntries}`);
+      console.log(`  ${friendlyStopReason(result.stopReason)}`);
+      console.log(`  ✓ Data: ${dataDir()}\n`);
+    }));
+
+  feed
+    .command('status')
+    .description('Show feed sync status and data location')
+    .action(safe(async () => {
+      if (!requireFeedData()) return;
+      const view = await getFeedStatusView();
+      console.log(formatFeedStatus(view));
+    }));
+
+  feed
+    .command('list')
+    .description('List cached Home timeline tweets')
+    .option('--limit <n>', 'Max results', (v: string) => Number(v), 30)
+    .option('--offset <n>', 'Offset into results', (v: string) => Number(v), 0)
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      if (!requireFeedIndex()) return;
+      const items = await listFeed({
+        limit: Number(options.limit) || 30,
+        offset: Number(options.offset) || 0,
+      });
+      if (options.json) {
+        console.log(JSON.stringify(items, null, 2));
+        return;
+      }
+      for (const item of items) {
+        const summary = item.text.length > 120 ? `${item.text.slice(0, 117)}...` : item.text;
+        console.log(`${item.id}  ${item.authorHandle ? `@${item.authorHandle}` : '@?'}  ${(item.postedAt ?? item.syncedAt)?.slice(0, 10) ?? '?'}`);
+        console.log(`  ${summary}`);
+        console.log(`  ${item.url}`);
+        console.log();
+      }
+    }));
+
+  feed
+    .command('show')
+    .description('Show one cached feed item in detail')
+    .argument('<id>', 'Feed item id')
+    .option('--json', 'JSON output')
+    .action(safe(async (id: string, options) => {
+      if (!requireFeedIndex()) return;
+      const item = await getFeedById(String(id));
+      if (!item) {
+        console.log(`  Feed item not found: ${String(id)}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (options.json) {
+        console.log(JSON.stringify(item, null, 2));
+        return;
+      }
+      console.log(`${item.id}  ${item.authorHandle ? `@${item.authorHandle}` : '@?'}  ${(item.postedAt ?? item.syncedAt)?.slice(0, 10) ?? '?'}`);
+      if (item.authorName) console.log(item.authorName);
+      console.log(item.text);
+      console.log(`\n${item.url}`);
+      console.log(`sortIndex: ${item.sortIndex ?? 'unknown'}  page: ${item.fetchPage ?? '?'}  position: ${item.fetchPosition ?? '?'}`);
     }));
 
   // ── path ────────────────────────────────────────────────────────────────
