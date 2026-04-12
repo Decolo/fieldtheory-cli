@@ -1,6 +1,6 @@
 # Field Theory CLI
 
-Sync and store locally your X/Twitter bookmarks and likes. Search them, classify bookmarks, and make them available to Claude Code, Codex, or any agent with shell access.
+Sync and store locally your X/Twitter bookmarks, likes, and Home timeline feed items. Search them, classify bookmarks, and make them available to Claude Code, Codex, or any agent with shell access.
 
 Free and open source. Designed for Mac.
 
@@ -28,21 +28,24 @@ ft sync
 # 2. Sync your likes into a separate local archive
 ft likes sync
 
-# 3. Search them
+# 3. Fetch your Home timeline into a local read-only feed archive
+ft feed sync --max-pages 2
+
+# 4. Search them
 ft search "distributed systems"
 ft likes search "distributed systems"
 
-# 4. Trim old likes in throttled batches
+# 5. Trim old likes in throttled batches
 ft likes trim --keep 200 --batch-size 25 --pause-seconds 45
 
-# 5. Explore bookmarks
+# 6. Explore bookmarks
 ft viz
 ft web
 ft categories
 ft stats
 ```
 
-On first run, `ft sync` and `ft likes sync` reuse your browser session from Chrome/Firefox and download data into `~/.ft-bookmarks/`.
+On first run, `ft sync`, `ft likes sync`, and `ft feed sync` reuse your browser session from Chrome/Firefox and download data into `~/.ft-bookmarks/`.
 
 ## Commands
 
@@ -57,6 +60,7 @@ On first run, `ft sync` and `ft likes sync` reuse your browser session from Chro
 | `ft sync --api` | Sync via OAuth API (cross-platform) |
 | `ft auth` | Set up OAuth for API-based sync (optional) |
 | `ft likes sync` | Download and sync liked posts into a separate local archive |
+| `ft feed sync` | Fetch Home timeline tweets into a local read-only feed archive |
 
 ### Search and browse
 
@@ -72,6 +76,9 @@ On first run, `ft sync` and `ft likes sync` reuse your browser session from Chro
 | `ft likes unlike <id>` | Unlike a post on X and update the local likes archive |
 | `ft likes trim` | Keep only the latest likes and unlike older posts on X in throttled batches |
 | `ft likes status` | Show likes archive status |
+| `ft feed list` | Browse cached Home timeline tweets with local paging |
+| `ft feed show <id>` | Show one cached feed item in detail |
+| `ft feed status` | Show feed archive status |
 | `ft web` | Launch a local web UI for bookmarks and likes |
 | `ft sample <category>` | Random sample from a category |
 | `ft stats` | Top authors, languages, date range |
@@ -159,6 +166,10 @@ All data is stored locally at `~/.ft-bookmarks/`:
   likes.db                # SQLite FTS5 search index for likes
   likes-meta.json         # likes sync metadata
   likes-backfill-state.json
+  feed.jsonl              # raw Home timeline cache (tweet-only entries)
+  feed.db                 # SQLite index for local feed browsing
+  feed-meta.json          # feed sync metadata
+  feed-state.json
   oauth-token.json        # OAuth token (if using API mode, chmod 600)
   md/                     # markdown knowledge base (ft wiki / ft md)
 ```
@@ -171,7 +182,7 @@ export FT_DATA_DIR=/path/to/custom/dir
 
 To remove all data: `rm -rf ~/.ft-bookmarks`
 
-Likes are intentionally a separate archive in v1. They support sync, search, list, show, status, and reindex. Classification, viz, stats, and media download remain bookmark-only features for now.
+Likes are intentionally a separate archive in v1. Feed items are also a separate archive family in v1. The feed surface is CLI-first, read-only, tweet-only, and focused on sync, local paging, list, show, and status. Classification, viz, stats, search, web viewing, and feed-driven actions remain later work.
 
 Single-item remote cleanup is also supported:
 
@@ -244,6 +255,8 @@ Session sync extracts cookies from your browser's local database. Use `ft sync -
 **The default bookmark sync uses X's internal GraphQL API**, the same API that x.com uses in your browser. For the official v2 API, use `ft auth` + `ft sync --api`.
 
 **The likes archive sync also uses your browser-authenticated X web session.** In v1 it is browser-session based only; there is no OAuth likes sync path yet.
+
+**The feed archive sync uses the same browser-authenticated X web session path.** In v1 it is read-only, CLI-first, and stores tweet-only Home timeline entries for local browsing.
 
 **Remote unlike, unbookmark, and likes trim use the same browser-authenticated X web session path.** On success, the CLI also reconciles the matching local cached records and rebuilds the relevant search index.
 

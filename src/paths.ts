@@ -68,6 +68,26 @@ export function isLikesFirstRun(): boolean {
   return !fs.existsSync(twitterLikesCachePath());
 }
 
+export function twitterFeedCachePath(): string {
+  return path.join(dataDir(), 'feed.jsonl');
+}
+
+export function twitterFeedMetaPath(): string {
+  return path.join(dataDir(), 'feed-meta.json');
+}
+
+export function twitterFeedStatePath(): string {
+  return path.join(dataDir(), 'feed-state.json');
+}
+
+export function twitterFeedIndexPath(): string {
+  return path.join(dataDir(), 'feed.db');
+}
+
+export function isFeedFirstRun(): boolean {
+  return !fs.existsSync(twitterFeedCachePath());
+}
+
 export function preferencesPath(): string {
   return path.join(dataDir(), '.preferences');
 }

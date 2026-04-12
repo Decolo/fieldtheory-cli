@@ -110,6 +110,36 @@ export interface LikeRecord {
   ingestedVia?: 'browser' | 'graphql';
 }
 
+export interface FeedRecord {
+  id: string;
+  tweetId: string;
+  authorHandle?: string;
+  authorName?: string;
+  authorProfileImageUrl?: string;
+  author?: BookmarkAuthorSnapshot;
+  url: string;
+  text: string;
+  postedAt?: string | null;
+  syncedAt: string;
+  sortIndex?: string | null;
+  fetchPage?: number | null;
+  fetchPosition?: number | null;
+  conversationId?: string;
+  inReplyToStatusId?: string;
+  inReplyToUserId?: string;
+  quotedStatusId?: string;
+  quotedTweet?: QuotedTweetSnapshot;
+  language?: string;
+  sourceApp?: string;
+  possiblySensitive?: boolean;
+  engagement?: BookmarkEngagementSnapshot;
+  media?: string[];
+  mediaObjects?: BookmarkMediaObject[];
+  links?: string[];
+  tags?: string[];
+  ingestedVia?: 'graphql';
+}
+
 export interface BookmarkCacheMeta {
   provider: 'twitter';
   schemaVersion: number;
@@ -124,6 +154,14 @@ export interface LikesCacheMeta {
   lastFullSyncAt?: string;
   lastIncrementalSyncAt?: string;
   totalLikes: number;
+}
+
+export interface FeedCacheMeta {
+  provider: 'twitter';
+  schemaVersion: number;
+  lastSyncAt?: string;
+  totalItems: number;
+  totalSkippedEntries: number;
 }
 
 export interface XOAuthTokenSet {
@@ -155,4 +193,16 @@ export interface LikesBackfillState {
   lastAdded: number;
   lastSeenIds: string[];
   stopReason?: string;
+}
+
+export interface FeedBackfillState {
+  provider: 'twitter';
+  lastRunAt?: string;
+  totalRuns: number;
+  totalFetched: number;
+  totalStored: number;
+  totalSkippedEntries: number;
+  lastSeenIds: string[];
+  stopReason?: string;
+  lastCursor?: string;
 }
