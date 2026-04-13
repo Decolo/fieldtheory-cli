@@ -18,7 +18,7 @@ export function SearchBar({ query, onQueryChange, onSubmit }: SearchBarProps) {
         className="search-input"
         value={query}
         onChange={(event) => onQueryChange(event.target.value)}
-        placeholder='Search text, phrase, or author. Example: "Claude Code"'
+        placeholder='Search a topic. Example: best practices on Claude Code'
       />
       <button className="search-button" type="submit">Search</button>
     </form>

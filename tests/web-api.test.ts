@@ -6,6 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { writeJson, writeJsonLines } from '../src/fs.js';
 import { buildIndex } from '../src/bookmarks-db.js';
 import { buildLikesIndex } from '../src/likes-db.js';
+import { buildFeedIndex } from '../src/feed-db.js';
 import { createWebApp } from '../src/web-server.js';
 
 const BOOKMARK_FIXTURES = [
@@ -44,9 +45,31 @@ const LIKE_FIXTURES = [
   },
 ];
 
+const FEED_FIXTURES = [
+  {
+    id: 'fd-1',
+    tweetId: '303',
+    url: 'https://x.com/carla/status/303',
+    text: 'Best practices on Claude Code and local agents.',
+    authorHandle: 'carla',
+    authorName: 'Carla',
+    syncedAt: '2026-04-03T00:00:00Z',
+    postedAt: '2026-04-03T00:00:00Z',
+    sortIndex: '3000',
+    fetchPage: 1,
+    fetchPosition: 0,
+    links: [],
+    tags: [],
+    media: [],
+    ingestedVia: 'graphql',
+  },
+];
+
 async function withArchiveData(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-web-api-'));
   process.env.FT_DATA_DIR = dir;
+  const previousDisable = process.env.FT_DISABLE_LLM_ASSIST;
+  process.env.FT_DISABLE_LLM_ASSIST = '1';
 
   try {
     await writeJsonLines(path.join(dir, 'bookmarks.jsonl'), BOOKMARK_FIXTURES);
@@ -63,11 +86,22 @@ async function withArchiveData(fn: (dir: string) => Promise<void>): Promise<void
       lastFullSyncAt: '2026-04-02T00:00:00Z',
       totalLikes: 1,
     });
+    await writeJsonLines(path.join(dir, 'feed.jsonl'), FEED_FIXTURES);
+    await writeJson(path.join(dir, 'feed-meta.json'), {
+      provider: 'twitter',
+      schemaVersion: 1,
+      lastSyncAt: '2026-04-03T00:00:00Z',
+      totalItems: 1,
+      totalSkippedEntries: 0,
+    });
     await buildIndex();
     await buildLikesIndex();
+    await buildFeedIndex();
     await fn(dir);
   } finally {
     delete process.env.FT_DATA_DIR;
+    if (previousDisable == null) delete process.env.FT_DISABLE_LLM_ASSIST;
+    else process.env.FT_DISABLE_LLM_ASSIST = previousDisable;
     await rm(dir, { recursive: true, force: true });
   }
 }
@@ -81,6 +115,7 @@ test('web api status returns bookmark and like summaries', { concurrency: false 
     const data = await response.json() as any;
     assert.equal(data.bookmarks.total, 1);
     assert.equal(data.likes.total, 1);
+    assert.equal(data.feed.total, 1);
   });
 });
 
@@ -132,4 +167,30 @@ test('web api returns empty lists when indexes are missing', { concurrency: fals
     delete process.env.FT_DATA_DIR;
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('web api returns hybrid search results and summaries', { concurrency: false }, async () => {
+  await withArchiveData(async () => {
+    const app = await createWebApp();
+
+    const listResponse = await app.request('/api/search?query=claude%20code&mode=topic&limit=5');
+    assert.equal(listResponse.status, 200);
+    const listData = await listResponse.json() as any;
+    assert.equal(listData.items.length >= 2, true);
+    assert.equal(listData.items[0].sources.includes('bookmarks') || listData.items[0].sources.includes('feed'), true);
+
+    const summaryResponse = await app.request('/api/search/summary?query=claude%20code&mode=action&limit=5');
+    assert.equal(summaryResponse.status, 200);
+    const summaryData = await summaryResponse.json() as any;
+    assert.equal(typeof summaryData.summary, 'string');
+    assert.equal(summaryData.summary.length > 0, true);
+  });
+});
+
+test('web api rejects invalid hybrid search mode', { concurrency: false }, async () => {
+  await withArchiveData(async () => {
+    const app = await createWebApp();
+    const response = await app.request('/api/search?query=claude&mode=wrong');
+    assert.equal(response.status, 400);
+  });
 });

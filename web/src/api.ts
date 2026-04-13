@@ -1,6 +1,10 @@
 import type {
   ArchiveSource,
   BookmarkItem,
+  HybridSearchMode,
+  HybridSearchResponse,
+  HybridSearchScope,
+  HybridSummaryResponse,
   LikeItem,
   ListResponse,
   StatusResponse,
@@ -33,4 +37,30 @@ export async function fetchArchiveList(
 
 export async function fetchArchiveItem(source: ArchiveSource, id: string): Promise<BookmarkItem | LikeItem> {
   return requestJson(`/api/${source}/${id}`);
+}
+
+export async function fetchHybridSearch(
+  query: string,
+  options: { mode?: HybridSearchMode; scope?: HybridSearchScope; limit?: number } = {},
+): Promise<HybridSearchResponse> {
+  const params = new URLSearchParams();
+  if (query) params.set('query', query);
+  if (options.mode) params.set('mode', options.mode);
+  if (options.scope) params.set('scope', options.scope);
+  if (options.limit) params.set('limit', String(options.limit));
+  const suffix = params.toString();
+  return requestJson(`/api/search${suffix ? `?${suffix}` : ''}`);
+}
+
+export async function fetchHybridSummary(
+  query: string,
+  options: { mode?: HybridSearchMode; scope?: HybridSearchScope; limit?: number } = {},
+): Promise<HybridSummaryResponse> {
+  const params = new URLSearchParams();
+  if (query) params.set('query', query);
+  if (options.mode) params.set('mode', options.mode);
+  if (options.scope) params.set('scope', options.scope);
+  if (options.limit) params.set('limit', String(options.limit));
+  const suffix = params.toString();
+  return requestJson(`/api/search/summary${suffix ? `?${suffix}` : ''}`);
 }

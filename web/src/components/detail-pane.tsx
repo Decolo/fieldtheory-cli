@@ -1,13 +1,26 @@
-import type { ArchiveSource, BookmarkItem, LikeItem } from '../types';
+import type {
+  ArchiveSource,
+  BookmarkItem,
+  HybridSearchMode,
+  HybridSearchResult,
+  LikeItem,
+  ViewSource,
+} from '../types';
 
 interface DetailPaneProps {
-  source: ArchiveSource;
-  item: BookmarkItem | LikeItem | null;
+  source: ViewSource;
+  item: BookmarkItem | LikeItem | HybridSearchResult | null;
   loading: boolean;
   error: string | null;
+  mode?: HybridSearchMode;
+  summary?: string | null;
 }
 
-function renderDateLabel(source: ArchiveSource, item: BookmarkItem | LikeItem): string {
+function renderDateLabel(source: ViewSource, item: BookmarkItem | LikeItem | HybridSearchResult): string {
+  if (source === 'search') {
+    const result = item as HybridSearchResult;
+    return `Sources ${result.sources.join(' + ')} · posted ${result.postedAt?.slice(0, 10) ?? '?'}`;
+  }
   if (source === 'bookmarks') {
     const bookmark = item as BookmarkItem;
     return `Bookmarked ${bookmark.bookmarkedAt?.slice(0, 10) ?? '?'} · posted ${bookmark.postedAt?.slice(0, 10) ?? '?'}`;
@@ -16,7 +29,7 @@ function renderDateLabel(source: ArchiveSource, item: BookmarkItem | LikeItem): 
   return `Liked ${like.likedAt?.slice(0, 10) ?? '?'} · posted ${like.postedAt?.slice(0, 10) ?? '?'}`;
 }
 
-export function DetailPane({ source, item, loading, error }: DetailPaneProps) {
+export function DetailPane({ source, item, loading, error, mode, summary }: DetailPaneProps) {
   if (loading) {
     return <section className="detail-pane"><div className="empty-state">Loading detail…</div></section>;
   }
@@ -26,16 +39,19 @@ export function DetailPane({ source, item, loading, error }: DetailPaneProps) {
   }
 
   if (!item) {
-    return <section className="detail-pane"><div className="empty-state">Select an item to inspect its full archive entry.</div></section>;
+    return <section className="detail-pane"><div className="empty-state">Select an item to inspect it.</div></section>;
   }
 
   const bookmark = source === 'bookmarks' ? item as BookmarkItem : null;
+  const searchItem = source === 'search' ? item as HybridSearchResult : null;
 
   return (
     <section className="detail-pane">
       <div className="detail-header">
         <div>
-          <div className="eyebrow">{source === 'bookmarks' ? 'Bookmark' : 'Like'}</div>
+          <div className="eyebrow">
+            {source === 'search' ? `Search result · ${mode ?? 'topic'}` : source === 'bookmarks' ? 'Bookmark' : 'Like'}
+          </div>
           <h2>{item.authorName || item.authorHandle || 'Unknown author'}</h2>
           <p className="detail-date">{renderDateLabel(source, item)}</p>
         </div>
@@ -46,11 +62,18 @@ export function DetailPane({ source, item, loading, error }: DetailPaneProps) {
         <p>{item.text}</p>
       </article>
 
+      {searchItem && summary ? (
+        <div className="detail-groups">
+          <h3>Summary</h3>
+          <p>{summary}</p>
+        </div>
+      ) : null}
+
       <dl className="detail-stats">
-        <div><dt>Likes</dt><dd>{item.likeCount ?? 0}</dd></div>
-        <div><dt>Reposts</dt><dd>{item.repostCount ?? 0}</dd></div>
-        <div><dt>Replies</dt><dd>{item.replyCount ?? 0}</dd></div>
-        <div><dt>Bookmarks</dt><dd>{item.bookmarkCount ?? 0}</dd></div>
+        <div><dt>Likes</dt><dd>{'likeCount' in item ? item.likeCount ?? 0 : 0}</dd></div>
+        <div><dt>Reposts</dt><dd>{'repostCount' in item ? item.repostCount ?? 0 : 0}</dd></div>
+        <div><dt>Replies</dt><dd>{'replyCount' in item ? item.replyCount ?? 0 : 0}</dd></div>
+        <div><dt>Bookmarks</dt><dd>{'bookmarkCount' in item ? item.bookmarkCount ?? 0 : 0}</dd></div>
       </dl>
 
       {bookmark && (bookmark.categories.length > 0 || bookmark.domains.length > 0) ? (
@@ -74,7 +97,7 @@ export function DetailPane({ source, item, loading, error }: DetailPaneProps) {
         </div>
       ) : null}
 
-      {item.links.length > 0 ? (
+      {'links' in item && item.links.length > 0 ? (
         <div className="detail-groups">
           <h3>Links</h3>
           <div className="link-stack">
