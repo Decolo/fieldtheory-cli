@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { buildFeedIndex, countFeed, getFeedById, listFeed } from '../src/feed-db.js';
+import { buildFeedIndex, countFeed, getFeedById, listFeed, searchFeed } from '../src/feed-db.js';
+import { openDb, saveDb } from '../src/db.js';
+import { twitterFeedIndexPath } from '../src/paths.js';
 
 const FIXTURES = [
   {
@@ -81,5 +83,43 @@ test('countFeed and getFeedById read from the indexed feed archive', async () =>
     assert.ok(item);
     assert.equal(item?.authorHandle, 'alice');
     assert.equal(item?.sortIndex, '2000');
+  });
+});
+
+test('searchFeed returns matching feed items through FTS', async () => {
+  await withFeedDataDir(async () => {
+    await buildFeedIndex();
+    const results = await searchFeed('refreshed', 5);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].id, '1');
+    assert.equal(results[0].tweetId, '1');
+  });
+});
+
+test('searchFeed rejects malformed FTS queries with a user-facing error', async () => {
+  await withFeedDataDir(async () => {
+    await buildFeedIndex();
+    await assert.rejects(
+      () => searchFeed('claude OR OR code', 5),
+      /Invalid search query/,
+    );
+  });
+});
+
+test('searchFeed lazily rebuilds feed FTS for older indexes that lack feed_fts', async () => {
+  await withFeedDataDir(async () => {
+    await buildFeedIndex();
+    const dbPath = twitterFeedIndexPath();
+    const db = await openDb(dbPath);
+    try {
+      db.run('DROP TABLE IF EXISTS feed_fts');
+      saveDb(db, dbPath);
+    } finally {
+      db.close();
+    }
+
+    const results = await searchFeed('newer', 5);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].id, '2');
   });
 });

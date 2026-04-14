@@ -33,7 +33,19 @@ export interface FeedTimelineFilters {
   offset?: number;
 }
 
-const SCHEMA_VERSION = 1;
+export interface FeedSearchResult {
+  id: string;
+  tweetId: string;
+  url: string;
+  text: string;
+  authorHandle?: string;
+  authorName?: string;
+  postedAt?: string | null;
+  syncedAt: string;
+  score: number;
+}
+
+const SCHEMA_VERSION = 2;
 
 function parseJsonArray(value: unknown): string[] {
   if (typeof value !== 'string' || !value.trim()) return [];
@@ -119,7 +131,25 @@ function initSchema(db: Database): void {
   db.run(`CREATE INDEX IF NOT EXISTS idx_feed_synced ON feed(synced_at)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_feed_sort_index ON feed(sort_index)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_feed_author ON feed(author_handle)`);
+  ensureFeedFts(db);
   db.run(`REPLACE INTO meta VALUES ('schema_version', '${SCHEMA_VERSION}')`);
+}
+
+function ensureFeedFts(db: Database): boolean {
+  const existing = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='feed_fts'");
+  const hadFts = Boolean(existing[0]?.values?.length);
+  db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS feed_fts USING fts5(
+    text,
+    author_handle,
+    author_name,
+    content=feed,
+    content_rowid=rowid,
+    tokenize='porter unicode61'
+  )`);
+  if (!hadFts) {
+    db.run(`INSERT INTO feed_fts(feed_fts) VALUES('rebuild')`);
+  }
+  return !hadFts;
 }
 
 function insertRecord(db: Database, record: FeedRecord): void {
@@ -165,6 +195,7 @@ export async function buildFeedIndex(options?: { force?: boolean }): Promise<{ d
 
   try {
     if (options?.force) {
+      db.run('DROP TABLE IF EXISTS feed_fts');
       db.run('DROP TABLE IF EXISTS feed');
       db.run('DROP TABLE IF EXISTS meta');
     }
@@ -189,9 +220,65 @@ export async function buildFeedIndex(options?: { force?: boolean }): Promise<{ d
       }
     }
 
+    db.run(`INSERT INTO feed_fts(feed_fts) VALUES('rebuild')`);
     saveDb(db, dbPath);
     const totalRows = db.exec('SELECT COUNT(*) FROM feed')[0]?.values[0]?.[0] as number;
     return { dbPath, recordCount: totalRows, newRecords: newRecords.length };
+  } finally {
+    db.close();
+  }
+}
+
+export async function searchFeed(query: string, limit = 20): Promise<FeedSearchResult[]> {
+  const dbPath = twitterFeedIndexPath();
+  const db = await openDb(dbPath);
+
+  try {
+    if (ensureFeedFts(db)) {
+      saveDb(db, dbPath);
+    }
+    let rows;
+    try {
+      rows = db.exec(
+        `
+          SELECT
+            f.id,
+            f.tweet_id,
+            f.url,
+            f.text,
+            f.author_handle,
+            f.author_name,
+            f.posted_at,
+            f.synced_at,
+            bm25(feed_fts, 5.0, 1.0, 1.0) as score
+          FROM feed f
+          JOIN feed_fts ON feed_fts.rowid = f.rowid
+          WHERE f.rowid IN (SELECT rowid FROM feed_fts WHERE feed_fts MATCH ?)
+          ORDER BY bm25(feed_fts, 5.0, 1.0, 1.0) ASC
+          LIMIT ?
+        `,
+        [query, limit],
+      );
+    } catch (error) {
+      const message = (error as Error).message ?? '';
+      if (message.includes('fts5') || message.includes('MATCH') || message.includes('syntax')) {
+        throw new Error(`Invalid search query: "${query}". Try simpler terms or wrap phrases in double quotes.`);
+      }
+      throw error;
+    }
+
+    if (!rows.length) return [];
+    return rows[0].values.map((row) => ({
+      id: row[0] as string,
+      tweetId: row[1] as string,
+      url: row[2] as string,
+      text: row[3] as string,
+      authorHandle: row[4] as string | undefined,
+      authorName: row[5] as string | undefined,
+      postedAt: row[6] as string | null,
+      syncedAt: row[7] as string,
+      score: row[8] as number,
+    }));
   } finally {
     db.close();
   }

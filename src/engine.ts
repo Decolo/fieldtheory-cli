@@ -143,6 +143,21 @@ export async function resolveEngine(): Promise<ResolvedEngine> {
   return resolve(available[0]);
 }
 
+export function tryResolveEngine(): ResolvedEngine | null {
+  if (process.env.FT_DISABLE_LLM_ASSIST === '1') {
+    return null;
+  }
+  const available = detectAvailableEngines();
+  if (available.length === 0) return null;
+
+  const prefs = loadPreferences();
+  if (prefs.defaultEngine && available.includes(prefs.defaultEngine)) {
+    return resolve(prefs.defaultEngine);
+  }
+
+  return resolve(available[0]);
+}
+
 // ── Invocation ─────────────────────────────────────────────────────────
 
 export interface InvokeOptions {

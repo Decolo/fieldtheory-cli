@@ -31,6 +31,8 @@ import {
   formatLikeSearchResults,
 } from './likes-db.js';
 import { listFeed, getFeedById } from './feed-db.js';
+import { runHybridSearch } from './hybrid-search.js';
+import type { HybridSearchMode, HybridSearchResult, HybridSearchScope } from './search-types.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
 import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
 import { resolveEngine, detectAvailableEngines } from './engine.js';
@@ -124,6 +126,20 @@ const FRIENDLY_STOP_REASONS: Record<string, string> = {
 function friendlyStopReason(raw?: string): string {
   if (!raw) return 'Sync complete.';
   return FRIENDLY_STOP_REASONS[raw] ?? `Sync complete \u2014 ${raw}`;
+}
+
+function formatHybridSearchResults(results: HybridSearchResult[], mode: HybridSearchMode): string {
+  if (results.length === 0) return 'No results found.';
+
+  return results
+    .map((result, index) => {
+      const author = result.authorHandle ? `@${result.authorHandle}` : 'unknown';
+      const date = result.postedAt?.slice(0, 10) ?? '?';
+      const text = result.text.length > 140 ? `${result.text.slice(0, 140)}...` : result.text;
+      const score = mode === 'action' ? result.actionScore : result.topicScore;
+      return `${index + 1}. [${result.sources.join('+')}] [${date}] ${author}  score=${score.toFixed(2)}\n   ${text}\n   ${result.url}`;
+    })
+    .join('\n\n');
 }
 
 function warnIfEmpty(totalBookmarks: number): void {
@@ -496,7 +512,7 @@ export function buildCli() {
 
   program
     .name('ft')
-    .description('Self-custody for your X/Twitter bookmarks and likes. Sync, search, classify bookmarks, and explore locally.')
+    .description('Self-custody for your X/Twitter bookmarks, likes, and feed. Sync, search, classify bookmarks, and explore locally.')
     .version(getLocalVersion())
     .showHelpAfterError()
     .hook('preAction', () => {
@@ -764,6 +780,46 @@ export function buildCli() {
       console.log(formatSearchResults(results));
     }));
 
+  program
+    .command('search-all')
+    .description('Hybrid search across feed, likes, and bookmarks')
+    .argument('<query>', 'Search query in plain language or keywords')
+    .option('--mode <mode>', 'Ranking mode: topic or action', 'topic')
+    .option('--scope <scope>', 'Scope: all, bookmarks, likes, or feed', 'all')
+    .option('--limit <n>', 'Max results', (v: string) => Number(v), 20)
+    .option('--summary', 'Add a result-set summary after the ranked items')
+    .option('--json', 'JSON output')
+    .action(safe(async (query: string, options) => {
+      const rawMode = String(options.mode ?? 'topic');
+      if (rawMode !== 'topic' && rawMode !== 'action') {
+        throw new Error(`Invalid search mode: "${rawMode}". Use "topic" or "action".`);
+      }
+      const mode = rawMode as HybridSearchMode;
+      const rawScope = String(options.scope ?? 'all');
+      if (!['all', 'bookmarks', 'likes', 'feed'].includes(rawScope)) {
+        throw new Error(`Invalid search scope: "${rawScope}". Use "all", "bookmarks", "likes", or "feed".`);
+      }
+      const scope = rawScope as HybridSearchScope;
+      const result = await runHybridSearch({
+        query,
+        mode,
+        scope,
+        limit: Number(options.limit) || 20,
+        summary: Boolean(options.summary),
+      });
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log(formatHybridSearchResults(result.results, mode));
+      if (result.summary) {
+        console.log('\nSummary');
+        console.log(result.summary);
+      }
+    }));
+
   // ── list ────────────────────────────────────────────────────────────────
 
   program
@@ -862,7 +918,7 @@ export function buildCli() {
 
   program
     .command('web')
-    .description('Serve a local web UI for bookmarks and likes')
+    .description('Serve a local web UI for hybrid search plus archive browsing')
     .option('--host <host>', 'Host interface to bind', '127.0.0.1')
     .option('--port <n>', 'Port to listen on', (v: string) => Number(v), 3147)
     .option('--open', 'Open the web UI in your default browser')

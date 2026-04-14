@@ -7,14 +7,25 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { countBookmarks, getBookmarkById, listBookmarks, type BookmarkTimelineFilters } from './bookmarks-db.js';
 import { countLikes, getLikeById, listLikes, type LikeTimelineFilters } from './likes-db.js';
+import { countFeed } from './feed-db.js';
+import { runHybridSearch } from './hybrid-search.js';
 import {
   dataDir,
   twitterBookmarksCachePath,
   twitterBookmarksIndexPath,
+  twitterFeedCachePath,
+  twitterFeedIndexPath,
   twitterLikesCachePath,
   twitterLikesIndexPath,
 } from './paths.js';
-import type { ApiListResponse, ApiStatusResponse } from './web-types.js';
+import type {
+  ApiHybridSearchResponse,
+  ApiHybridSummaryResponse,
+  ApiListResponse,
+  ApiStatusResponse,
+  HybridSearchMode,
+  HybridSearchScope,
+} from './web-types.js';
 
 export interface WebServerOptions {
   host?: string;
@@ -38,6 +49,18 @@ function parseInteger(value: string | undefined, fallback: number, min = 0): num
 
 function isMissingTableError(error: unknown): boolean {
   return error instanceof Error && /no such table/i.test(error.message);
+}
+
+function parseHybridMode(value: string | undefined): HybridSearchMode {
+  if (value == null || value === 'topic') return 'topic';
+  if (value === 'action') return 'action';
+  throw new Error(`Invalid search mode: "${value}". Use "topic" or "action".`);
+}
+
+function parseHybridScope(value: string | undefined): HybridSearchScope {
+  if (value == null || value === 'all') return 'all';
+  if (value === 'bookmarks' || value === 'likes' || value === 'feed') return value;
+  throw new Error(`Invalid search scope: "${value}". Use "all", "bookmarks", "likes", or "feed".`);
 }
 
 function repoRootFromModule(): string {
@@ -75,7 +98,7 @@ export async function createWebApp(options: WebServerOptions = {}): Promise<Hono
 
   app.onError((error) => {
     const message = error instanceof Error ? error.message : 'Unexpected server error';
-    const status = /Invalid search query/i.test(message) ? 400 : 500;
+    const status = /Invalid search (query|mode|scope)/i.test(message) ? 400 : 500;
     return Response.json({ error: message }, { status });
   });
 
@@ -92,6 +115,50 @@ export async function createWebApp(options: WebServerOptions = {}): Promise<Hono
         hasCache: fs.existsSync(twitterLikesCachePath()),
         hasIndex: fs.existsSync(twitterLikesIndexPath()),
       },
+      feed: {
+        total: fs.existsSync(twitterFeedIndexPath()) ? await countFeed() : 0,
+        hasCache: fs.existsSync(twitterFeedCachePath()),
+        hasIndex: fs.existsSync(twitterFeedIndexPath()),
+      },
+    };
+    return c.json(response);
+  });
+
+  app.get('/api/search', async (c) => {
+    const query = c.req.query('query') ?? '';
+    const mode = parseHybridMode(c.req.query('mode'));
+    const scope = parseHybridScope(c.req.query('scope'));
+    const limit = parseInteger(c.req.query('limit'), 20, 1);
+    const result = await runHybridSearch({ query, mode, scope, limit });
+
+    const response: ApiHybridSearchResponse = {
+      query: result.query,
+      mode: result.mode,
+      scope: result.scope,
+      usedEngine: result.usedEngine,
+      expansions: result.expansions,
+      total: result.results.length,
+      items: result.results,
+    };
+    return c.json(response);
+  });
+
+  app.get('/api/search/summary', async (c) => {
+    const query = c.req.query('query') ?? '';
+    const mode = parseHybridMode(c.req.query('mode'));
+    const scope = parseHybridScope(c.req.query('scope'));
+    const limit = parseInteger(c.req.query('limit'), 20, 1);
+    const result = await runHybridSearch({ query, mode, scope, limit, summary: true });
+
+    const response: ApiHybridSummaryResponse = {
+      query: result.query,
+      mode: result.mode,
+      scope: result.scope,
+      usedEngine: result.usedEngine,
+      expansions: result.expansions,
+      total: result.results.length,
+      items: result.results,
+      summary: result.summary ?? '',
     };
     return c.json(response);
   });

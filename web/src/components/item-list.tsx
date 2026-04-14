@@ -1,14 +1,23 @@
-import type { ArchiveSource, BookmarkItem, LikeItem } from '../types';
+import type {
+  ArchiveSource,
+  BookmarkItem,
+  HybridSearchResult,
+  LikeItem,
+  ViewSource,
+} from '../types';
 
 interface ItemListProps {
-  items: Array<BookmarkItem | LikeItem>;
-  source: ArchiveSource;
+  items: Array<BookmarkItem | LikeItem | HybridSearchResult>;
+  source: ViewSource;
   selectedId?: string | null;
   loading: boolean;
   onSelect: (id: string) => void;
 }
 
-function getItemDate(source: ArchiveSource, item: BookmarkItem | LikeItem): string {
+function getItemDate(source: ViewSource, item: BookmarkItem | LikeItem | HybridSearchResult): string {
+  if (source === 'search') {
+    return (item as HybridSearchResult).postedAt ?? '';
+  }
   return source === 'bookmarks'
     ? (item as BookmarkItem).bookmarkedAt ?? item.postedAt ?? ''
     : (item as LikeItem).likedAt ?? item.postedAt ?? '';
@@ -38,8 +47,12 @@ export function ItemList({ items, source, selectedId, loading, onSelect }: ItemL
           </div>
           <p className="item-text">{item.text}</p>
           <div className="item-meta">
-            <span>{item.linkCount} links</span>
-            <span>{item.mediaCount} media</span>
+            {source === 'search'
+              ? <span>{(item as HybridSearchResult).sources.join('+')}</span>
+              : <span>{item.linkCount} links</span>}
+            {source === 'search'
+              ? <span>score {(item as HybridSearchResult).score.toFixed(2)}</span>
+              : <span>{item.mediaCount} media</span>}
           </div>
         </button>
       ))}

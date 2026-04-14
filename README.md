@@ -34,6 +34,8 @@ ft feed sync --max-pages 2
 # 4. Search them
 ft search "distributed systems"
 ft likes search "distributed systems"
+ft search-all "best practices on claude code"
+ft search-all "claude code" --mode action --summary
 
 # 5. Trim old likes in throttled batches
 ft likes trim --keep 200 --batch-size 25 --pause-seconds 45
@@ -66,7 +68,8 @@ On first run, `ft sync`, `ft likes sync`, and `ft feed sync` reuse your browser 
 
 | Command | Description |
 |---------|-------------|
-| `ft search <query>` | Full-text search with BM25 ranking |
+| `ft search <query>` | Full-text bookmark search with BM25 ranking |
+| `ft search-all <query>` | Hybrid search across feed, likes, and bookmarks |
 | `ft list` | Filter by author, date, category, domain |
 | `ft show <id>` | Show one bookmark in detail |
 | `ft unbookmark <id>` | Remove a bookmark on X and update the local bookmark archive |
@@ -79,7 +82,7 @@ On first run, `ft sync`, `ft likes sync`, and `ft feed sync` reuse your browser 
 | `ft feed list` | Browse cached Home timeline tweets with local paging |
 | `ft feed show <id>` | Show one cached feed item in detail |
 | `ft feed status` | Show feed archive status |
-| `ft web` | Launch a local web UI for bookmarks and likes |
+| `ft web` | Launch a local web UI for hybrid search plus archive browsing |
 | `ft sample <category>` | Random sample from a category |
 | `ft stats` | Top authors, languages, date range |
 | `ft viz` | Terminal dashboard with sparklines, categories, and domains |
@@ -182,7 +185,7 @@ export FT_DATA_DIR=/path/to/custom/dir
 
 To remove all data: `rm -rf ~/.ft-bookmarks`
 
-Likes are intentionally a separate archive in v1. Feed items are also a separate archive family in v1. The feed surface is CLI-first, read-only, tweet-only, and focused on sync, local paging, list, show, and status. Classification, viz, stats, search, web viewing, and feed-driven actions remain later work.
+Likes are intentionally a separate archive in v1. Feed items are also a separate archive family in v1. Archive-specific list/show flows stay separate, while `ft search-all` and the local web UI now provide one mixed-source hybrid search surface across feed, likes, and bookmarks.
 
 Single-item remote cleanup is also supported:
 
@@ -201,6 +204,23 @@ ft likes trim --keep 200 --batch-size 25 --pause-seconds 45
 
 The command recomputes the trim set from your current local archive on each run, so it is safe to resume after an interruption. It unlikes older posts on X in batches, rewrites `likes.jsonl`, updates `likes-meta.json`, and rebuilds `likes.db` once per batch.
 
+## Hybrid search
+
+Use the new mixed-source search command when you want topic discovery instead of exact archive-by-archive matching:
+
+```bash
+# Topic relevance across feed + likes + bookmarks
+ft search-all "claude code"
+
+# Use action-worthiness ranking to prioritize items you'd likely like/bookmark
+ft search-all "claude code" --mode action
+
+# Add a concise summary after the ranked result list
+ft search-all "best practices on claude code" --summary
+```
+
+`ft search-all` stays local-first. It uses SQLite/FTS candidate retrieval across all three archives, then reranks locally. When an installed Claude or Codex CLI is available and the query looks long or natural-language-heavy, Field Theory may expand the query to improve topical recall. If no engine is available, the search still works locally.
+
 ## Web UI
 
 Build and launch the local web UI:
@@ -218,6 +238,13 @@ tsx src/cli.ts web
 ```
 
 The web UI is local-only by default and binds to `127.0.0.1`. It serves the built frontend assets, so run `npm run build` at least once before starting `ft web`.
+
+The default web view is now search-first:
+
+- search across feed, likes, and bookmarks in one result list
+- switch between `topic` and `action` ranking
+- request an optional result summary
+- keep bookmarks/likes archive browsing available as separate tabs
 
 ## Categories
 
