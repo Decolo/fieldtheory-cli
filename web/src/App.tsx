@@ -1,5 +1,5 @@
 import { startTransition, useEffect, useState } from 'react';
-import { fetchArchiveItem, fetchArchiveList, fetchHybridSearch, fetchHybridSummary, fetchStatus } from './api';
+import { fetchArchiveItem, fetchArchiveList, fetchHybridSearch, fetchStatus } from './api';
 import { ArchiveLayout } from './components/archive-layout';
 import type {
   ArchiveSource,
@@ -122,22 +122,17 @@ export function App() {
       }}
       onSelectSource={(nextSource) => {
         setSource(nextSource);
+        setSelectedId(null);
         setSelectedItem(null);
       }}
       onSelectArchiveSource={(nextSource) => {
         setArchiveSource(nextSource);
         setSource(nextSource);
+        setSelectedId(null);
         setSelectedItem(null);
       }}
       onSelectSearchMode={(nextMode) => {
         setSearchMode(nextMode);
-      }}
-      onSummarize={() => {
-        startTransition(() => {
-          fetchHybridSummary(submittedQuery || queryInput.trim(), { mode: searchMode, limit: 20 })
-            .then((response) => setSearchSummary(response.summary))
-            .catch((error: Error) => setDetailError(error.message));
-        });
       }}
       onSelectItem={setSelectedId}
     />

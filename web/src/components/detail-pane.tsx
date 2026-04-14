@@ -16,17 +16,26 @@ interface DetailPaneProps {
   summary?: string | null;
 }
 
+function isHybridSearchResult(item: BookmarkItem | LikeItem | HybridSearchResult): item is HybridSearchResult {
+  return Array.isArray((item as HybridSearchResult).sources);
+}
+
+function isBookmarkItem(item: BookmarkItem | LikeItem | HybridSearchResult): item is BookmarkItem {
+  return Array.isArray((item as BookmarkItem).categories) && Array.isArray((item as BookmarkItem).domains);
+}
+
 function renderDateLabel(source: ViewSource, item: BookmarkItem | LikeItem | HybridSearchResult): string {
-  if (source === 'search') {
-    const result = item as HybridSearchResult;
+  if (source === 'search' && isHybridSearchResult(item)) {
+    const result = item;
     return `Sources ${result.sources.join(' + ')} · posted ${result.postedAt?.slice(0, 10) ?? '?'}`;
   }
-  if (source === 'bookmarks') {
-    const bookmark = item as BookmarkItem;
+  if (source === 'bookmarks' && isBookmarkItem(item)) {
+    const bookmark = item;
     return `Bookmarked ${bookmark.bookmarkedAt?.slice(0, 10) ?? '?'} · posted ${bookmark.postedAt?.slice(0, 10) ?? '?'}`;
   }
-  const like = item as LikeItem;
-  return `Liked ${like.likedAt?.slice(0, 10) ?? '?'} · posted ${like.postedAt?.slice(0, 10) ?? '?'}`;
+  const postedAt = item.postedAt?.slice(0, 10) ?? '?';
+  const likedAt = 'likedAt' in item ? item.likedAt?.slice(0, 10) ?? '?' : '?';
+  return `Liked ${likedAt} · posted ${postedAt}`;
 }
 
 export function DetailPane({ source, item, loading, error, mode, summary }: DetailPaneProps) {
@@ -42,8 +51,8 @@ export function DetailPane({ source, item, loading, error, mode, summary }: Deta
     return <section className="detail-pane"><div className="empty-state">Select an item to inspect it.</div></section>;
   }
 
-  const bookmark = source === 'bookmarks' ? item as BookmarkItem : null;
-  const searchItem = source === 'search' ? item as HybridSearchResult : null;
+  const bookmark = source === 'bookmarks' && isBookmarkItem(item) ? item : null;
+  const searchItem = source === 'search' && isHybridSearchResult(item) ? item : null;
 
   return (
     <section className="detail-pane">
