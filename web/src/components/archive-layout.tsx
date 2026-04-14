@@ -29,7 +29,6 @@ interface ArchiveLayoutProps {
   onSelectSource: (source: ViewSource) => void;
   onSelectArchiveSource: (source: ArchiveSource) => void;
   onSelectSearchMode: (mode: HybridSearchMode) => void;
-  onSummarize: () => void;
   onSelectItem: (id: string) => void;
 }
 
@@ -46,76 +45,61 @@ export function ArchiveLayout(props: ArchiveLayoutProps) {
 
   return (
     <main className="app-shell">
-      <section className="hero">
-        <div>
-          <div className="eyebrow">Local hybrid archive search</div>
-          <h1>Search feed, likes, and bookmarks on your machine.</h1>
-          <p>
-            Use topic search by default, switch to action-worthiness when you want the archive to prioritize what you would likely save.
-          </p>
-        </div>
-        <div className="hero-stats">
-          <div>
-            <span>Bookmarks</span>
-            <strong>{formatCount(props.status?.bookmarks.total)}</strong>
+      <section className="toolbar toolbar-primary">
+        <div className="toolbar-row">
+          <div className="toolbar-brand">
+            <div className="eyebrow">field theory</div>
+            <div className="toolbar-title">local x archive</div>
           </div>
-          <div>
-            <span>Likes</span>
-            <strong>{formatCount(props.status?.likes.total)}</strong>
-          </div>
-          <div>
-            <span>Feed</span>
-            <strong>{formatCount(props.status?.feed.total)}</strong>
-          </div>
-          <div>
-            <span>Active view</span>
-            <strong>{formatCount(activeCount)}</strong>
+          <div className="toolbar-stats" aria-label="Archive counts">
+            <span>bm {formatCount(props.status?.bookmarks.total)}</span>
+            <span>likes {formatCount(props.status?.likes.total)}</span>
+            <span>feed {formatCount(props.status?.feed.total)}</span>
+            <span>view {formatCount(activeCount)}</span>
           </div>
         </div>
-      </section>
-
-      <section className="toolbar">
-        <div className="tabs" role="tablist" aria-label="Archive type">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={props.source === 'search'}
-            className={`tab${props.source === 'search' ? ' is-active' : ''}`}
-            onClick={() => props.onSelectSource('search')}
-          >
-            search
-          </button>
-          {(['bookmarks', 'likes'] as const).map((source) => (
+        <div className="toolbar-row toolbar-controls">
+          <div className="tabs" role="tablist" aria-label="Archive type">
             <button
-              key={source}
               type="button"
               role="tab"
-              aria-selected={props.source === source}
-              className={`tab${props.source === source ? ' is-active' : ''}`}
-              onClick={() => props.onSelectArchiveSource(source)}
+              aria-selected={props.source === 'search'}
+              className={`tab${props.source === 'search' ? ' is-active' : ''}`}
+              onClick={() => props.onSelectSource('search')}
             >
-              {source}
+              search
             </button>
-          ))}
-        </div>
-        {props.source === 'search' ? (
-          <div className="tabs" role="tablist" aria-label="Search mode">
-            {(['topic', 'action'] as const).map((mode) => (
+            {(['bookmarks', 'likes'] as const).map((source) => (
               <button
-                key={mode}
+                key={source}
                 type="button"
                 role="tab"
-                aria-selected={props.searchMode === mode}
-                className={`tab${props.searchMode === mode ? ' is-active' : ''}`}
-                onClick={() => props.onSelectSearchMode(mode)}
+                aria-selected={props.source === source}
+                className={`tab${props.source === source ? ' is-active' : ''}`}
+                onClick={() => props.onSelectArchiveSource(source)}
               >
-                {mode}
+                {source}
               </button>
             ))}
-            <button type="button" className="tab" onClick={props.onSummarize}>summary</button>
           </div>
-        ) : null}
-        <SearchBar query={props.query} onQueryChange={props.onQueryChange} onSubmit={props.onSearch} />
+          {props.source === 'search' ? (
+            <div className="tabs" role="tablist" aria-label="Search mode">
+              {(['topic', 'action'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  role="tab"
+                  aria-selected={props.searchMode === mode}
+                  className={`tab${props.searchMode === mode ? ' is-active' : ''}`}
+                  onClick={() => props.onSelectSearchMode(mode)}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <SearchBar query={props.query} onQueryChange={props.onQueryChange} onSubmit={props.onSearch} />
+        </div>
       </section>
 
       <section className="workspace">

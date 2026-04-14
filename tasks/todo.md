@@ -10,6 +10,27 @@
 - [x] Review: run structured review, fix findings, and record outcomes
 - [ ] Ship: commit, push, and open a PR against `Decolo/fieldtheory-cli`
 
+## 2026-04-14 web scroll regression
+
+### Plan
+
+- [x] Reproduce the current web scroll failure and confirm the CSS/layout root cause
+- [x] Fix the height/overflow chain so the list pane matches viewport height and scrolls independently
+- [x] Verify in a real browser that list scrolling, detail scrolling, tab switching, and search still work
+- [x] Update relevant docs to reflect the corrected web layout behavior
+
+### Review
+
+- Root cause was the outer height chain being broken: `html/body/#root` used `min-height` instead of a fixed viewport-height chain, so the workspace expanded with content and the intended inner scroll containers never engaged reliably.
+- Updated `web/src/styles.css` so desktop uses `height: 100%/100vh`, `body` and `.app-shell` stop page-level scrolling, `.workspace` becomes a bounded flex child, and both `.item-list` and `.detail-pane` own their own overflow.
+- Preserved mobile behavior by restoring normal page overflow below `980px` so the stacked layout does not trap scrolling.
+- Verification passed:
+  - `npm run build`
+  - `npm test -- tests/web-api.test.ts tests/cli-web.test.ts tests/cli-hybrid-search.test.ts`
+  - Headless browser check on `http://127.0.0.1:3147`: in `likes`, `.item-list` reported `clientHeight=718`, `scrollHeight=14614`, and `scrollTop` changed from `0` to `600`
+  - Headless browser regression flow `bookmarks -> likes -> search -> likes -> bookmarks` completed without page errors or crashes
+- Updated `README.md` to remove stale hybrid-search summary/LLM wording and document the desktop split-pane scrolling behavior.
+
 ## Notes
 
 - Origin requirements: `docs/brainstorms/2026-04-14-feed-hybrid-search-requirements.md`

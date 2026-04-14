@@ -132,5 +132,7 @@ test('runHybridSearch supports natural-language queries and action ranking', asy
     assert.equal(result.results[0].isBookmarked, true);
     assert.equal(result.results[0].isLiked, true);
     assert.match(result.summary ?? '', /Top results|Claude|local/i);
+    assert.equal(result.usedEngine, false);
+    assert.deepEqual(result.expansions, []);
   });
 });

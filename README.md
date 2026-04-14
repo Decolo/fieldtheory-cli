@@ -35,7 +35,7 @@ ft feed sync --max-pages 2
 ft search "distributed systems"
 ft likes search "distributed systems"
 ft search-all "best practices on claude code"
-ft search-all "claude code" --mode action --summary
+ft search-all "claude code" --mode action
 
 # 5. Trim old likes in throttled batches
 ft likes trim --keep 200 --batch-size 25 --pause-seconds 45
@@ -215,11 +215,9 @@ ft search-all "claude code"
 # Use action-worthiness ranking to prioritize items you'd likely like/bookmark
 ft search-all "claude code" --mode action
 
-# Add a concise summary after the ranked result list
-ft search-all "best practices on claude code" --summary
 ```
 
-`ft search-all` stays local-first. It uses SQLite/FTS candidate retrieval across all three archives, then reranks locally. When an installed Claude or Codex CLI is available and the query looks long or natural-language-heavy, Field Theory may expand the query to improve topical recall. If no engine is available, the search still works locally.
+`ft search-all` stays local-first. It uses SQLite/FTS candidate retrieval across feed, likes, and bookmarks, then reranks locally. No LLM is required for the hybrid search path.
 
 ## Web UI
 
@@ -243,8 +241,8 @@ The default web view is now search-first:
 
 - search across feed, likes, and bookmarks in one result list
 - switch between `topic` and `action` ranking
-- request an optional result summary
 - keep bookmarks/likes archive browsing available as separate tabs
+- keep the list pane and detail pane independently scrollable on desktop
 
 ## Categories
 

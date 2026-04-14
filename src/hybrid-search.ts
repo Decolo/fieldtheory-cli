@@ -1,8 +1,6 @@
-import { invokeEngineAsync, tryResolveEngine } from './engine.js';
 import { searchBookmarks } from './bookmarks-db.js';
 import { searchLikes } from './likes-db.js';
 import { searchFeed } from './feed-db.js';
-import { buildHybridExpansionPrompt, buildHybridSummaryPrompt } from './hybrid-search-prompt.js';
 import type {
   HybridSearchMode,
   HybridSearchResponse,
@@ -59,48 +57,6 @@ function buildLocalProbes(query: string): string[] {
   }
 
   return Array.from(probes).filter(Boolean);
-}
-
-function shouldExpandQuery(query: string): boolean {
-  const tokens = tokenizeQuery(query);
-  return query.trim().length >= 28 || tokens.length >= 5;
-}
-
-function parseExpansionResponse(raw: string): string[] {
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = fenced?.[1] ?? raw;
-  try {
-    const parsed = JSON.parse(candidate);
-    const probes = Array.isArray(parsed)
-      ? parsed
-      : Array.isArray(parsed?.probes)
-        ? parsed.probes
-        : [];
-    return probes.filter((entry: unknown): entry is string => typeof entry === 'string' && entry.trim().length > 0);
-  } catch {
-    return [];
-  }
-}
-
-async function expandQueryIfHelpful(query: string): Promise<{ usedEngine: boolean; expansions: string[] }> {
-  if (!shouldExpandQuery(query)) {
-    return { usedEngine: false, expansions: [] };
-  }
-
-  const engine = tryResolveEngine();
-  if (!engine) {
-    return { usedEngine: false, expansions: [] };
-  }
-
-  try {
-    const raw = await invokeEngineAsync(engine, buildHybridExpansionPrompt(query), {
-      timeout: 45_000,
-      maxBuffer: 1024 * 1024,
-    });
-    return { usedEngine: true, expansions: parseExpansionResponse(raw) };
-  } catch {
-    return { usedEngine: false, expansions: [] };
-  }
 }
 
 function registerCandidate(
@@ -185,23 +141,11 @@ function buildFallbackSummary(results: HybridSearchResult[]): string {
 }
 
 async function summarizeResults(
-  query: string,
-  mode: HybridSearchMode,
+  _query: string,
+  _mode: HybridSearchMode,
   results: HybridSearchResult[],
 ): Promise<string> {
-  if (results.length === 0) return 'No matching results were found.';
-
-  const engine = tryResolveEngine();
-  if (!engine) return buildFallbackSummary(results);
-
-  try {
-    return await invokeEngineAsync(engine, buildHybridSummaryPrompt(query, mode, results), {
-      timeout: 60_000,
-      maxBuffer: 1024 * 1024,
-    });
-  } catch {
-    return buildFallbackSummary(results);
-  }
+  return buildFallbackSummary(results);
 }
 
 export async function runHybridSearch(options: HybridSearchOptions): Promise<HybridSearchResponse> {
@@ -223,11 +167,7 @@ export async function runHybridSearch(options: HybridSearchOptions): Promise<Hyb
     };
   }
 
-  const expansion = await expandQueryIfHelpful(query);
-  const probes = Array.from(new Set([
-    ...buildLocalProbes(query),
-    ...expansion.expansions.flatMap((probe) => buildLocalProbes(probe)),
-  ])).slice(0, 8);
+  const probes = buildLocalProbes(query).slice(0, 8);
 
   const candidateMap = new Map<string, CandidateAccumulator>();
   const allowSource = (source: HybridSearchSource): boolean => scope === 'all' || scope === source;
@@ -326,8 +266,8 @@ export async function runHybridSearch(options: HybridSearchOptions): Promise<Hyb
     query,
     mode,
     scope,
-    usedEngine: expansion.usedEngine,
-    expansions: expansion.expansions,
+    usedEngine: false,
+    expansions: [],
     results,
     summary,
   };

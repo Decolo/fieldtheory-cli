@@ -15,7 +15,7 @@
 }
 
 html, body, #root {
-  min-height: 100%;
+  height: 100%;
   margin: 0;
 }
 
@@ -26,6 +26,7 @@ body {
     radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 34%),
     radial-gradient(circle at top right, rgba(195, 92, 60, 0.12), transparent 30%),
     linear-gradient(180deg, #faf6ef 0%, var(--bg) 100%);
+  overflow: hidden;
 }
 
 button, input, a {
@@ -39,25 +40,13 @@ a {
 .app-shell {
   max-width: 1440px;
   margin: 0 auto;
-  padding: 40px 24px 24px;
+  padding: 16px;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
-.hero {
-  display: grid;
-  grid-template-columns: 1.7fr 1fr;
-  gap: 24px;
-  align-items: end;
-  margin-bottom: 20px;
-}
-
-.hero h1 {
-  margin: 0;
-  font-size: clamp(2.4rem, 5vw, 4.8rem);
-  line-height: 0.94;
-  letter-spacing: -0.06em;
-}
-
-.hero p,
 .detail-body p,
 .empty-state {
   color: var(--muted);
@@ -74,7 +63,6 @@ a {
   letter-spacing: 0.08em;
 }
 
-.hero-stats,
 .toolbar,
 .list-panel,
 .detail-pane {
@@ -84,43 +72,66 @@ a {
   box-shadow: var(--shadow);
 }
 
-.hero-stats {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-  padding: 18px;
-  border-radius: 24px;
-}
-
-.hero-stats div {
-  padding: 12px;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.54);
-}
-
-.hero-stats span {
-  display: block;
-  color: var(--muted);
-  margin-bottom: 6px;
-}
-
-.hero-stats strong {
-  font-size: 1.7rem;
-}
-
 .toolbar {
   display: flex;
-  gap: 16px;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 12px;
   padding: 16px;
   margin-bottom: 18px;
   border-radius: 22px;
 }
 
+.toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.toolbar-primary {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.toolbar-brand {
+  min-width: 140px;
+}
+
+.toolbar-title {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.toolbar-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-left: auto;
+  color: var(--muted);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.toolbar-stats span {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.toolbar-controls {
+  align-items: stretch;
+}
+
 .tabs {
   display: inline-flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .tab,
@@ -153,7 +164,8 @@ a {
   display: flex;
   gap: 10px;
   flex: 1;
-  max-width: 700px;
+  max-width: none;
+  min-width: 0;
 }
 
 .search-input {
@@ -169,12 +181,20 @@ a {
   display: grid;
   grid-template-columns: minmax(340px, 430px) 1fr;
   gap: 18px;
-  min-height: 72vh;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .list-panel,
 .detail-pane {
   border-radius: 28px;
+  min-height: 0;
+}
+
+.list-panel {
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
 
@@ -183,6 +203,10 @@ a {
   flex-direction: column;
   padding: 12px;
   gap: 10px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .item-row {
@@ -225,6 +249,9 @@ a {
 
 .detail-pane {
   padding: 28px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .detail-header {
@@ -304,21 +331,40 @@ a {
 }
 
 @media (max-width: 980px) {
-  .hero,
-  .workspace {
-    grid-template-columns: 1fr;
+  body {
+    overflow: auto;
   }
 
-  .toolbar {
+  .app-shell {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+    height: auto;
+    overflow: visible;
+  }
+
+  .toolbar-row,
+  .toolbar-controls {
     flex-direction: column;
     align-items: stretch;
   }
 
-  .search-bar {
-    max-width: none;
+  .toolbar-stats {
+    margin-left: 0;
+    justify-content: flex-start;
   }
 
   .detail-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .list-panel,
+  .detail-pane,
+  .item-list {
+    overflow: visible;
   }
 }
