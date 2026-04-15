@@ -19,7 +19,7 @@ export class RemoteTweetActionError extends Error {
 
 export interface RemoteTweetActionResult {
   tweetId: string;
-  operation: 'unlike' | 'unbookmark';
+  operation: 'like' | 'unlike' | 'bookmark' | 'unbookmark';
   responseKey: string;
 }
 
@@ -35,6 +35,20 @@ const UNBOOKMARK_MUTATION: MutationSpec = {
   operationName: 'DeleteBookmark',
   responseKey: 'tweet_bookmark_delete',
   failureLabel: 'Failed to delete bookmark',
+};
+
+const LIKE_MUTATION: MutationSpec = {
+  queryId: 'lI07N6Otwv1PhnEgXILM7A',
+  operationName: 'FavoriteTweet',
+  responseKey: 'favorite_tweet',
+  failureLabel: 'Failed to like tweet',
+};
+
+const BOOKMARK_MUTATION: MutationSpec = {
+  queryId: 'aoDbu3RHznuiSkQ9aNM67Q',
+  operationName: 'CreateBookmark',
+  responseKey: 'tweet_bookmark_put',
+  failureLabel: 'Failed to create bookmark',
 };
 
 async function runMutation(
@@ -65,7 +79,10 @@ async function runMutation(
   }
 
   const json = await response.json() as Record<string, any>;
-  if (json?.data?.[spec.responseKey] !== 'Done') {
+  const successValue = json?.data?.[spec.responseKey]
+    ?? json?.data?.tweetBookmarkPut
+    ?? json?.data?.favoriteTweet;
+  if (successValue !== 'Done') {
     throw new RemoteTweetActionError(
       `${spec.failureLabel}.\n` +
       `Response: ${JSON.stringify(json).slice(0, 300)}`,
@@ -74,9 +91,20 @@ async function runMutation(
 
   return {
     tweetId,
-    operation: spec === UNLIKE_MUTATION ? 'unlike' : 'unbookmark',
+    operation:
+      spec === UNLIKE_MUTATION ? 'unlike'
+      : spec === UNBOOKMARK_MUTATION ? 'unbookmark'
+      : spec === LIKE_MUTATION ? 'like'
+      : 'bookmark',
     responseKey: spec.responseKey,
   };
+}
+
+export async function likeTweet(
+  tweetId: string,
+  options: XSessionOptions = {},
+): Promise<RemoteTweetActionResult> {
+  return runMutation(LIKE_MUTATION, tweetId, options);
 }
 
 export async function unlikeTweet(
@@ -91,4 +119,11 @@ export async function unbookmarkTweet(
   options: XSessionOptions = {},
 ): Promise<RemoteTweetActionResult> {
   return runMutation(UNBOOKMARK_MUTATION, tweetId, options);
+}
+
+export async function bookmarkTweet(
+  tweetId: string,
+  options: XSessionOptions = {},
+): Promise<RemoteTweetActionResult> {
+  return runMutation(BOOKMARK_MUTATION, tweetId, options);
 }

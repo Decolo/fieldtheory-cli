@@ -1,7 +1,7 @@
 ---
 title: feat: Add CLI-first X home timeline viewer
 type: feat
-status: active
+status: completed
 date: 2026-04-12
 origin: docs/brainstorms/2026-04-12-x-feed-requirements.md
 ---
@@ -110,7 +110,7 @@ ft feed show <id>
 
 ## Implementation Units
 
-- [ ] **Unit 1: Validate and normalize the Home timeline fetch contract**
+- [x] **Unit 1: Validate and normalize the Home timeline fetch contract**
 
 **Goal:** Add a dedicated feed fetcher that can authenticate with the existing browser-session model, fetch Home timeline pages, normalize tweet entries into a feed-specific record shape, and persist cache/meta/state files.
 
@@ -159,7 +159,7 @@ ft feed show <id>
 **Verification:**
 - Fixture-driven tests prove the fetcher accepts tweet entries, rejects unsupported contract shapes explicitly, and persists the expected cache artifacts in a temp data dir.
 
-- [ ] **Unit 2: Add a local feed index and read models for paging**
+- [x] **Unit 2: Add a local feed index and read models for paging**
 
 **Goal:** Build a feed-specific SQLite index and read API that support local paging and detailed item lookup over cached feed records.
 
@@ -204,7 +204,7 @@ ft feed show <id>
 **Verification:**
 - Temp-data index tests prove the feed archive can be rebuilt, paged, and queried using the same local model as existing archive families.
 
-- [ ] **Unit 3: Expose the CLI-first feed viewer**
+- [x] **Unit 3: Expose the CLI-first feed viewer**
 
 **Goal:** Add a top-level `feed` command group that lets the user fetch, inspect status, list paged results, and show one cached feed item from the terminal.
 
@@ -245,7 +245,7 @@ ft feed show <id>
 **Verification:**
 - CLI tests prove the command group is discoverable and the public read-only workflow works against temp cache/index fixtures.
 
-- [ ] **Unit 4: Document the new archive family and operator boundaries**
+- [x] **Unit 4: Document the new archive family and operator boundaries**
 
 **Goal:** Update docs and working checklist artifacts so the new feed surface is discoverable and its intentional phase-1 limits are recorded.
 
