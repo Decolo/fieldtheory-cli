@@ -1,8 +1,10 @@
 import fs from 'node:fs';
 import { ensureDataDir, preferencesPath } from './paths.js';
+import type { FeedPreferences } from './types.js';
 
 export interface Preferences {
   defaultEngine?: string;
+  feedPreferences?: FeedPreferences;
 }
 
 export function loadPreferences(): Preferences {

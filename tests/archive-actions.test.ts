@@ -3,7 +3,15 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { removeBookmarkFromArchive, removeLikeFromArchive, removeLikesFromArchive } from '../src/archive-actions.js';
+import {
+  removeBookmarkFromArchive,
+  removeLikeFromArchive,
+  removeLikesFromArchive,
+  upsertBookmarkInArchive,
+  upsertBookmarksInArchive,
+  upsertLikeInArchive,
+  upsertLikesInArchive,
+} from '../src/archive-actions.js';
 import { buildIndex, getBookmarkById } from '../src/bookmarks-db.js';
 import { buildLikesIndex, getLikeById } from '../src/likes-db.js';
 import { writeJson } from '../src/fs.js';
@@ -139,5 +147,92 @@ test('removeLikesFromArchive treats tweetId matches as removed instead of missin
     assert.deepEqual(result.removedIds, ['internal-like-row']);
     assert.deepEqual(result.missingIds, []);
     assert.equal(result.totalRemaining, 0);
+  });
+});
+
+test('upsertLikeInArchive inserts a new like and rebuilds the likes index', async () => {
+  await withArchiveData(async () => {
+    const result = await upsertLikeInArchive({
+      ...LIKE_FIXTURE,
+      id: 'l2',
+      tweetId: 'l2',
+      url: 'https://x.com/bob/status/l2',
+      text: 'New auto like',
+      likedAt: '2026-03-04T00:00:00Z',
+      syncedAt: '2026-03-04T00:00:00Z',
+    });
+    assert.equal(result.inserted, true);
+    assert.equal(result.totalRecords, 2);
+    assert.ok(await getLikeById('l2'));
+  });
+});
+
+test('upsertBookmarkInArchive refreshes an existing bookmark instead of duplicating it', async () => {
+  await withArchiveData(async () => {
+    const result = await upsertBookmarkInArchive({
+      ...BOOKMARK_FIXTURE,
+      text: 'Updated bookmark text',
+      bookmarkedAt: '2026-03-05T00:00:00Z',
+      syncedAt: '2026-03-05T00:00:00Z',
+    });
+    assert.equal(result.inserted, false);
+    const stored = await getBookmarkById('b1');
+    assert.ok(stored);
+    assert.equal(stored?.text, 'Updated bookmark text');
+  });
+});
+
+test('upsertLikesInArchive inserts and updates likes in one rebuild', async () => {
+  await withArchiveData(async () => {
+    const result = await upsertLikesInArchive([
+      {
+        ...LIKE_FIXTURE,
+        text: 'Updated saved like',
+        syncedAt: '2026-03-04T00:00:00Z',
+      },
+      {
+        ...LIKE_FIXTURE,
+        id: 'l2',
+        tweetId: 'l2',
+        url: 'https://x.com/bob/status/l2',
+        text: 'Second saved like',
+        likedAt: '2026-03-04T00:00:00Z',
+        syncedAt: '2026-03-04T00:00:00Z',
+      },
+    ]);
+
+    assert.equal(result.insertedCount, 1);
+    assert.equal(result.updatedCount, 1);
+    assert.equal(result.totalRecords, 2);
+    assert.equal((await getLikeById('l1'))?.text, 'Updated saved like');
+    assert.ok(await getLikeById('l2'));
+  });
+});
+
+test('upsertBookmarksInArchive inserts and updates bookmarks in one rebuild', async () => {
+  await withArchiveData(async () => {
+    const result = await upsertBookmarksInArchive([
+      {
+        ...BOOKMARK_FIXTURE,
+        text: 'Updated bookmark text again',
+        syncedAt: '2026-03-06T00:00:00Z',
+        bookmarkedAt: '2026-03-06T00:00:00Z',
+      },
+      {
+        ...BOOKMARK_FIXTURE,
+        id: 'b2',
+        tweetId: 'b2',
+        url: 'https://x.com/alice/status/b2',
+        text: 'Second bookmark',
+        syncedAt: '2026-03-06T00:00:00Z',
+        bookmarkedAt: '2026-03-06T00:00:00Z',
+      },
+    ]);
+
+    assert.equal(result.insertedCount, 1);
+    assert.equal(result.updatedCount, 1);
+    assert.equal(result.totalRecords, 2);
+    assert.equal((await getBookmarkById('b1'))?.text, 'Updated bookmark text again');
+    assert.ok(await getBookmarkById('b2'));
   });
 });

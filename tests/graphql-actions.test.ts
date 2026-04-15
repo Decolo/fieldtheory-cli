@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { unlikeTweet, unbookmarkTweet } from '../src/graphql-actions.js';
+import { bookmarkTweet, likeTweet, unlikeTweet, unbookmarkTweet } from '../src/graphql-actions.js';
 
 test('unlikeTweet posts the current X web mutation with tweet_id variables', async () => {
   const originalFetch = globalThis.fetch;
@@ -52,6 +52,58 @@ test('unbookmarkTweet maps auth failures to re-login guidance', async () => {
       }),
       /make sure you are logged in/i,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('likeTweet posts the current X web mutation with tweet_id variables', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestUrl = '';
+  let requestBody = '';
+
+  globalThis.fetch = (async (input, init) => {
+    requestUrl = String(input);
+    requestBody = String(init?.body ?? '');
+    return new Response(JSON.stringify({ data: { favorite_tweet: 'Done' } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  process.env.FT_X_API_ORIGIN = 'https://x.test';
+
+  try {
+    const result = await likeTweet('789', {
+      csrfToken: 'ct0-token',
+      cookieHeader: 'ct0=ct0-token; auth_token=auth',
+    });
+
+    assert.equal(result.operation, 'like');
+    assert.match(requestUrl, /https:\/\/x\.test\/i\/api\/graphql\/lI07N6Otwv1PhnEgXILM7A\/FavoriteTweet$/);
+    assert.deepEqual(JSON.parse(requestBody), {
+      variables: { tweet_id: '789' },
+      queryId: 'lI07N6Otwv1PhnEgXILM7A',
+    });
+  } finally {
+    delete process.env.FT_X_API_ORIGIN;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('bookmarkTweet accepts the current bookmark success payload', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ data: { tweet_bookmark_put: 'Done' } }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })) as typeof fetch;
+
+  try {
+    const result = await bookmarkTweet('999', {
+      csrfToken: 'ct0-token',
+      cookieHeader: 'ct0=ct0-token; auth_token=auth',
+    });
+    assert.equal(result.operation, 'bookmark');
   } finally {
     globalThis.fetch = originalFetch;
   }

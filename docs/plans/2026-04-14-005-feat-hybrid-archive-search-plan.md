@@ -1,7 +1,7 @@
 ---
 title: feat: Add hybrid cross-archive search
 type: feat
-status: active
+status: completed
 date: 2026-04-14
 origin: docs/brainstorms/2026-04-14-feed-hybrid-search-requirements.md
 ---
@@ -37,6 +37,7 @@ The repo can already sync and browse bookmarks, likes, and feed items locally, b
 - No attempt to replace archive-specific list/show flows.
 - No production-grade recommendation explanation system in this release.
 - No semantic ingest-time embeddings pipeline in this release.
+  Note: this constraint applied to the hybrid-search release itself. Feed-action semantic indexing was added later in `docs/plans/2026-04-15-008-feat-feed-semantic-vector-retrieval-plan.md`.
 
 ## Context & Research
 
@@ -61,7 +62,7 @@ The repo can already sync and browse bookmarks, likes, and feed items locally, b
 ## Key Technical Decisions
 
 - Hybrid architecture: use FTS candidate retrieval plus local reranking, not FTS-only and not ingest-time embeddings.
-  Rationale: this satisfies the semantic retrieval goal without adding new storage infrastructure or background indexing pipelines.
+  Rationale: this satisfied the hybrid-search release goal without adding new storage infrastructure or background indexing pipelines at that time. Later feed-action work introduced a shared semantic store for automation.
 - Model assistance is query-time only and optional.
   Rationale: long natural-language queries benefit from rewrite/expansion, but short exact-ish queries should remain fully local and deterministic.
 - Feed must gain FTS support before unified search can exist.
@@ -123,7 +124,7 @@ flowchart TD
 
 ## Implementation Units
 
-- [ ] **Unit 1: Add feed retrieval parity and unified search result types**
+- [x] **Unit 1: Add feed retrieval parity and unified search result types**
 
 **Goal:** Give feed the same indexed search capability as bookmarks and likes, then define the shared result model needed for cross-archive retrieval.
 
@@ -157,7 +158,7 @@ flowchart TD
 **Verification:**
 - Feed fixtures can be indexed and queried through the new public search function with deterministic results.
 
-- [ ] **Unit 2: Build the hybrid cross-archive search service**
+- [x] **Unit 2: Build the hybrid cross-archive search service**
 
 **Goal:** Create one query planner, candidate merger, reranker, and optional summary pipeline across feed, likes, and bookmarks.
 
@@ -200,7 +201,7 @@ flowchart TD
 **Verification:**
 - The public hybrid search service can be invoked from tests with fixture data and produces stable mixed-source output for both ranking modes.
 
-- [ ] **Unit 3: Expose hybrid search through CLI and web API**
+- [x] **Unit 3: Expose hybrid search through CLI and web API**
 
 **Goal:** Add agent-friendly CLI entry points and Hono API routes for mixed-source search and optional summaries.
 
@@ -242,7 +243,7 @@ flowchart TD
 **Verification:**
 - CLI and web API tests prove that both surfaces hit the same hybrid search behavior and preserve list-first semantics.
 
-- [ ] **Unit 4: Add the web search experience and sync docs**
+- [x] **Unit 4: Add the web search experience and sync docs**
 
 **Goal:** Surface hybrid search in the local React app, keep the existing archive viewer useful, and update project docs for the new capability.
 

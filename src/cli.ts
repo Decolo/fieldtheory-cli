@@ -4,6 +4,10 @@ import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { getLikesStatusView, formatLikesStatus } from './likes-service.js';
 import { getFeedStatusView, formatFeedStatus } from './feed-service.js';
+import { formatFeedAgentLog, formatFeedAgentStatus, getFeedAgentStatusView, listFeedAgentLog, runFeedAgent } from './feed-agent.js';
+import { formatFeedDaemonStatus, getFeedDaemonState, startFeedDaemon, stopFeedDaemon } from './feed-daemon.js';
+import { addFeedPreference, formatFeedPreferences, loadFeedPreferences, removeFeedPreference } from './feed-preferences.js';
+import { formatSemanticStatus, getSemanticStatusView, rebuildSemanticIndex } from './semantic-indexer.js';
 import { runTwitterOAuthFlow } from './xauth.js';
 import { syncBookmarksGraphQL, syncGaps } from './graphql-bookmarks.js';
 import { syncLikesGraphQL, type LikesSyncProgress } from './graphql-likes.js';
@@ -463,6 +467,47 @@ function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promis
       process.exitCode = 1;
     }
   };
+}
+
+export function parseIntervalMs(raw: string): number {
+  const value = String(raw).trim().toLowerCase();
+  const match = value.match(/^(\d+)(s|m|h)$/);
+  if (!match) {
+    throw new Error(`Invalid interval: "${raw}". Use forms like 30s, 5m, or 2h.`);
+  }
+
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error(`Invalid interval: "${raw}". Interval must be greater than zero.`);
+  }
+
+  const unit = match[2];
+  if (unit === 's') return amount * 1000;
+  if (unit === 'm') return amount * 60 * 1000;
+  return amount * 60 * 60 * 1000;
+}
+
+async function waitForNextRun(intervalMs: number): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(true);
+    }, intervalMs);
+
+    const onSignal = () => {
+      cleanup();
+      resolve(false);
+    };
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      process.removeListener('SIGINT', onSignal);
+      process.removeListener('SIGTERM', onSignal);
+    };
+
+    process.once('SIGINT', onSignal);
+    process.once('SIGTERM', onSignal);
+  });
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
@@ -1610,6 +1655,268 @@ export function buildCli() {
       console.log(item.text);
       console.log(`\n${item.url}`);
       console.log(`sortIndex: ${item.sortIndex ?? 'unknown'}  page: ${item.fetchPage ?? '?'}  position: ${item.fetchPosition ?? '?'}`);
+    }));
+
+  const resolveFeedSessionOptions = (options: Record<string, unknown>) => {
+    let csrfToken: string | undefined;
+    let cookieHeader: string | undefined;
+    if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
+      csrfToken = String(options.cookies[0]);
+      const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+      const parts = [`ct0=${csrfToken}`];
+      if (authToken) parts.push(`auth_token=${authToken}`);
+      cookieHeader = parts.join('; ');
+    }
+
+    return {
+      browser: options.browser ? String(options.browser) : undefined,
+      csrfToken,
+      cookieHeader,
+      chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+      chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+      firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+    };
+  };
+
+  const feedAgent = feed
+    .command('agent')
+    .description('Run autonomous feed liking/bookmarking and inspect its local history');
+
+  feedAgent
+    .command('run')
+    .description('Run the autonomous feed agent once or on a fixed interval')
+    .option('--max-pages <n>', 'How many feed pages to sync before evaluating', (v: string) => Number(v), 1)
+    .option('--candidate-limit <n>', 'How many local feed items to score this run', (v: string) => Number(v), 40)
+    .option('--like-threshold <n>', 'Like threshold between 0 and 1', (v: string) => Number(v))
+    .option('--bookmark-threshold <n>', 'Bookmark threshold between 0 and 1', (v: string) => Number(v))
+    .option('--every <interval>', 'Repeat forever with an interval like 30s, 5m, or 2h')
+    .option('--dry-run', 'Score and log decisions without sending remote actions')
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (options) => {
+      ensureDataDir();
+      const sessionOptions = resolveFeedSessionOptions(options);
+
+      const runOnce = async (): Promise<void> => {
+        const result = await runFeedAgent({
+          maxPages: Number(options.maxPages) || 0,
+          candidateLimit: Number(options.candidateLimit) || 40,
+          likeThreshold: options.likeThreshold != null ? Number(options.likeThreshold) : undefined,
+          bookmarkThreshold: options.bookmarkThreshold != null ? Number(options.bookmarkThreshold) : undefined,
+          dryRun: Boolean(options.dryRun),
+          ...sessionOptions,
+        });
+
+        console.log(`Feed agent run: ${result.runId}`);
+        console.log(`  feed refresh: ${result.feedSync.attempted ? `${result.feedSync.added} new (${result.feedSync.totalItems} total)` : 'skipped'}`);
+        console.log(`  consumed: ${result.evaluated}`);
+        console.log(`  auto-liked: ${result.liked}`);
+        console.log(`  auto-bookmarked: ${result.bookmarked}`);
+        console.log(`  skipped: ${result.skipped}`);
+        console.log(`  action failures: ${result.failed}`);
+        if (result.dryRun) console.log('  mode: dry-run');
+        console.log(`  state: ${result.statePath}`);
+        console.log(`  log: ${result.logPath}`);
+      };
+
+      const every = options.every ? String(options.every) : undefined;
+      if (!every) {
+        await runOnce();
+        return;
+      }
+
+      const intervalMs = parseIntervalMs(every);
+      console.log(`Feed agent scheduler: every ${every}`);
+
+      while (true) {
+        await runOnce();
+        const nextRunAt = new Date(Date.now() + intervalMs).toISOString();
+        console.log(`  next run: ${nextRunAt}`);
+        console.log(`  waiting: ${every}`);
+        const shouldContinue = await waitForNextRun(intervalMs);
+        if (!shouldContinue) {
+          console.log('Feed agent scheduler stopped.');
+          return;
+        }
+      }
+    }));
+
+  const feedDaemon = feed
+    .command('daemon')
+    .description('Run feed refresh plus immediate consumption on a recurring timer');
+
+  feedDaemon
+    .command('start')
+    .description('Start the recurring feed daemon')
+    .requiredOption('--every <interval>', 'Repeat with an interval like 30s, 5m, or 2h')
+    .option('--max-pages <n>', 'How many feed pages to sync before consuming', (v: string) => Number(v), 1)
+    .option('--candidate-limit <n>', 'How many new feed items to score each tick', (v: string) => Number(v), 40)
+    .option('--like-threshold <n>', 'Like threshold between 0 and 1', (v: string) => Number(v))
+    .option('--bookmark-threshold <n>', 'Bookmark threshold between 0 and 1', (v: string) => Number(v))
+    .option('--dry-run', 'Score and log decisions without sending remote actions')
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (options) => {
+      ensureDataDir();
+      const intervalMs = parseIntervalMs(String(options.every));
+      console.log(`Feed daemon: every ${String(options.every)}`);
+      console.log('  Each tick: refresh feed -> consume new items');
+      await startFeedDaemon({
+        everyMs: intervalMs,
+        maxPages: options.maxPages != null ? Number(options.maxPages) : 1,
+        candidateLimit: options.candidateLimit != null ? Number(options.candidateLimit) : 40,
+        likeThreshold: options.likeThreshold != null ? Number(options.likeThreshold) : undefined,
+        bookmarkThreshold: options.bookmarkThreshold != null ? Number(options.bookmarkThreshold) : undefined,
+        dryRun: Boolean(options.dryRun),
+        ...resolveFeedSessionOptions(options),
+      });
+    }));
+
+  feedDaemon
+    .command('status')
+    .description('Show daemon status and the last tick result')
+    .action(safe(async () => {
+      console.log(await formatFeedDaemonStatus());
+    }));
+
+  feedDaemon
+    .command('stop')
+    .description('Stop the recurring feed daemon')
+    .action(safe(async () => {
+      const result = await stopFeedDaemon();
+      if (!result.stopped) {
+        console.log(`Feed daemon is not running${result.pid ? ` (stale pid ${result.pid})` : ''}.`);
+        return;
+      }
+      console.log(`Stopped feed daemon pid=${result.pid}`);
+    }));
+
+  feedDaemon
+    .command('log')
+    .description('Show daemon activity summary')
+    .action(safe(async () => {
+      const state = await getFeedDaemonState();
+      console.log(await formatFeedDaemonStatus());
+      if (state.pid) console.log('\n  Use your shell or tail on the daemon log for live follow-up.');
+    }));
+
+  const feedPrefs = feed
+    .command('prefs')
+    .description('Manage explicit feed preferences for auto-like and auto-bookmark decisions');
+
+  const feedSemantic = feed
+    .command('semantic')
+    .description('Inspect and rebuild the local semantic retrieval index');
+
+  feedPrefs
+    .command('show')
+    .description('Show active feed preferences')
+    .action(() => {
+      console.log(formatFeedPreferences(loadFeedPreferences()));
+    });
+
+  feedPrefs
+    .command('like')
+    .description('Prefer a target for automatic likes')
+    .argument('<kind>', 'author, domain, or topic')
+    .argument('<value>', 'Target value')
+    .action(safe(async (kind: string, value: string) => {
+      addFeedPreference('like', 'prefer', kind as 'author' | 'domain' | 'topic', value);
+      console.log(formatFeedPreferences(loadFeedPreferences()));
+    }));
+
+  feedPrefs
+    .command('dislike')
+    .description('Avoid a target for automatic likes')
+    .argument('<kind>', 'author, domain, or topic')
+    .argument('<value>', 'Target value')
+    .action(safe(async (kind: string, value: string) => {
+      addFeedPreference('like', 'avoid', kind as 'author' | 'domain' | 'topic', value);
+      console.log(formatFeedPreferences(loadFeedPreferences()));
+    }));
+
+  feedPrefs
+    .command('bookmark')
+    .description('Prefer a target for automatic bookmarks')
+    .argument('<kind>', 'author, domain, or topic')
+    .argument('<value>', 'Target value')
+    .action(safe(async (kind: string, value: string) => {
+      addFeedPreference('bookmark', 'prefer', kind as 'author' | 'domain' | 'topic', value);
+      console.log(formatFeedPreferences(loadFeedPreferences()));
+    }));
+
+  feedPrefs
+    .command('avoid-bookmark')
+    .description('Avoid a target for automatic bookmarks')
+    .argument('<kind>', 'author, domain, or topic')
+    .argument('<value>', 'Target value')
+    .action(safe(async (kind: string, value: string) => {
+      addFeedPreference('bookmark', 'avoid', kind as 'author' | 'domain' | 'topic', value);
+      console.log(formatFeedPreferences(loadFeedPreferences()));
+    }));
+
+  feedPrefs
+    .command('remove')
+    .description('Remove one explicit feed preference')
+    .argument('<mode>', 'like, dislike, bookmark, or avoid-bookmark')
+    .argument('<kind>', 'author, domain, or topic')
+    .argument('<value>', 'Target value')
+    .action(safe(async (mode: string, kind: string, value: string) => {
+      const mapping = {
+        like: ['like', 'prefer'],
+        dislike: ['like', 'avoid'],
+        bookmark: ['bookmark', 'prefer'],
+        'avoid-bookmark': ['bookmark', 'avoid'],
+      } as const;
+      const resolved = mapping[mode as keyof typeof mapping];
+      if (!resolved) throw new Error(`Invalid preference mode: "${mode}".`);
+      removeFeedPreference(resolved[0], resolved[1], kind as 'author' | 'domain' | 'topic', value);
+      console.log(formatFeedPreferences(loadFeedPreferences()));
+    }));
+
+  feedSemantic
+    .command('status')
+    .description('Show semantic provider config and local vector coverage')
+    .action(safe(async () => {
+      console.log(formatSemanticStatus(await getSemanticStatusView()));
+    }));
+
+  feedSemantic
+    .command('rebuild')
+    .description('Rebuild semantic vectors for feed, likes, bookmarks, and topic preferences')
+    .action(safe(async () => {
+      ensureDataDir();
+      const meta = await rebuildSemanticIndex();
+      console.log(formatSemanticStatus(await getSemanticStatusView()));
+      console.log(`\nSemantic rebuild complete at ${meta.updatedAt}.`);
+    }));
+
+  feedAgent
+    .command('status')
+    .description('Show cumulative feed agent state and local artifact paths')
+    .option('--like-threshold <n>', 'Like threshold between 0 and 1', (v: string) => Number(v))
+    .option('--bookmark-threshold <n>', 'Bookmark threshold between 0 and 1', (v: string) => Number(v))
+    .action(safe(async (options) => {
+      const view = await getFeedAgentStatusView({
+        likeThreshold: options.likeThreshold != null ? Number(options.likeThreshold) : undefined,
+        bookmarkThreshold: options.bookmarkThreshold != null ? Number(options.bookmarkThreshold) : undefined,
+      });
+      console.log(formatFeedAgentStatus(view));
+    }));
+
+  feedAgent
+    .command('log')
+    .description('Show recent feed agent actions and skips')
+    .option('--limit <n>', 'How many log entries to print', (v: string) => Number(v), 20)
+    .action(safe(async (options) => {
+      const entries = await listFeedAgentLog(Number(options.limit) || 20);
+      console.log(formatFeedAgentLog(entries));
     }));
 
   // ── path ────────────────────────────────────────────────────────────────

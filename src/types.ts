@@ -206,3 +206,131 @@ export interface FeedBackfillState {
   stopReason?: string;
   lastCursor?: string;
 }
+
+export interface FeedAgentItemState {
+  tweetId: string;
+  lastEvaluatedAt?: string;
+  lastRunId?: string;
+  lastLikeScore?: number;
+  lastBookmarkScore?: number;
+  likedAt?: string;
+  bookmarkedAt?: string;
+}
+
+export interface FeedAgentState {
+  provider: 'twitter';
+  schemaVersion: number;
+  lastRunAt?: string;
+  lastRunId?: string;
+  totalRuns: number;
+  totalEvaluated: number;
+  totalLiked: number;
+  totalBookmarked: number;
+  items: Record<string, FeedAgentItemState>;
+}
+
+export type FeedPreferenceTargetKind = 'author' | 'domain' | 'topic';
+export type FeedPreferenceActionKind = 'like' | 'bookmark';
+export type FeedPreferenceDisposition = 'prefer' | 'avoid';
+
+export interface FeedPreferenceRule {
+  kind: FeedPreferenceTargetKind;
+  value: string;
+  createdAt: string;
+}
+
+export interface FeedPreferenceBucket {
+  prefer: FeedPreferenceRule[];
+  avoid: FeedPreferenceRule[];
+}
+
+export interface FeedPreferences {
+  like: FeedPreferenceBucket;
+  bookmark: FeedPreferenceBucket;
+}
+
+export interface FeedDaemonState {
+  schemaVersion: number;
+  pid?: number;
+  startedAt?: string;
+  lastTickStartedAt?: string;
+  lastTickFinishedAt?: string;
+  lastFetchAdded?: number;
+  lastFetchTotalItems?: number;
+  lastConsumed?: number;
+  lastLiked?: number;
+  lastBookmarked?: number;
+  lastFailed?: number;
+  lastError?: string;
+  intervalMs?: number;
+}
+
+export interface FeedAgentLogEntry {
+  runId: string;
+  timestamp: string;
+  tweetId: string;
+  authorHandle?: string;
+  url: string;
+  decision: 'skip' | 'like' | 'bookmark' | 'like+bookmark' | 'dry-run' | 'error';
+  likeScore: number;
+  bookmarkScore: number;
+  actions: {
+    like: 'applied' | 'already-done' | 'skipped' | 'planned' | 'failed';
+    bookmark: 'applied' | 'already-done' | 'skipped' | 'planned' | 'failed';
+  };
+  reasons: string[];
+  error?: string;
+}
+
+export type EmbeddingProviderName = 'aliyun-bailian' | 'openai-compatible';
+export type SemanticDocumentSource = 'feed' | 'likes' | 'bookmarks';
+
+export interface SemanticMeta {
+  schemaVersion: number;
+  provider: EmbeddingProviderName;
+  model: string;
+  baseUrl: string;
+  dimensions: number;
+  embeddingVersion: string;
+  updatedAt: string;
+  lastFullRebuildAt?: string;
+  documents: Record<SemanticDocumentSource, number>;
+  preferences: {
+    likePrefer: number;
+    likeAvoid: number;
+    bookmarkPrefer: number;
+    bookmarkAvoid: number;
+  };
+}
+
+export interface SemanticDocumentRow {
+  id: string;
+  source: SemanticDocumentSource;
+  tweetId: string;
+  url: string;
+  authorHandle?: string;
+  authorName?: string;
+  postedAt?: string | null;
+  text: string;
+  textHash: string;
+  embeddingVersion: string;
+  vector: number[];
+}
+
+export interface SemanticPreferenceRow {
+  id: string;
+  action: FeedPreferenceActionKind;
+  disposition: FeedPreferenceDisposition;
+  rawText: string;
+  normalizedText: string;
+  textHash: string;
+  embeddingVersion: string;
+  vector: number[];
+}
+
+export interface SemanticSearchHit {
+  id: string;
+  distance: number;
+  score: number;
+  row: SemanticDocumentRow | SemanticPreferenceRow;
+}
