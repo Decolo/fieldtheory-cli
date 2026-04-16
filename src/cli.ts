@@ -12,7 +12,7 @@ import { runTwitterOAuthFlow } from './xauth.js';
 import { syncBookmarksGraphQL, syncGaps } from './graphql-bookmarks.js';
 import { syncLikesGraphQL, type LikesSyncProgress } from './graphql-likes.js';
 import { syncFeedGraphQL, type FeedSyncProgress } from './graphql-feed.js';
-import { unlikeTweet, unbookmarkTweet } from './graphql-actions.js';
+import { bookmarkTweet, unlikeTweet, unbookmarkTweet } from './graphql-actions.js';
 import type { SyncProgress, GapFillProgress } from './graphql-bookmarks.js';
 import { fetchBookmarkMediaBatch } from './bookmark-media.js';
 import {
@@ -64,6 +64,7 @@ import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { assertWebAssetsBuilt, startWebServer } from './web.js';
 import { trimLikes } from './likes-trim.js';
+import { loadEnv } from './config.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -513,6 +514,7 @@ async function waitForNextRun(intervalMs: number): Promise<boolean> {
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
 export function buildCli() {
+  loadEnv();
   const program = new Command();
 
   async function rebuildIndex(): Promise<number> {
@@ -1186,6 +1188,39 @@ export function buildCli() {
     }));
 
   // ── status ──────────────────────────────────────────────────────────────
+
+  program
+    .command('bookmark')
+    .description('Create one bookmark on X')
+    .argument('<id>', 'Post id')
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (id: string, options) => {
+      let csrfToken: string | undefined;
+      let cookieHeader: string | undefined;
+      if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
+        csrfToken = String(options.cookies[0]);
+        const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+        const parts = [`ct0=${csrfToken}`];
+        if (authToken) parts.push(`auth_token=${authToken}`);
+        cookieHeader = parts.join('; ');
+      }
+
+      const result = await bookmarkTweet(String(id), {
+        browser: options.browser ? String(options.browser) : undefined,
+        csrfToken,
+        cookieHeader,
+        chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+        chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+        firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+      });
+
+      console.log(`\n  ✓ Created bookmark on X: ${result.tweetId}`);
+      console.log(`  Attempts: ${result.attempts}\n`);
+    }));
 
   program
     .command('status')
