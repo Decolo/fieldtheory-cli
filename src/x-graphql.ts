@@ -27,6 +27,28 @@ export interface XSessionAuth {
   cookieHeader?: string;
 }
 
+export type XRequestErrorKind = 'network' | 'auth' | 'rate_limit' | 'upstream' | 'unknown';
+
+export class XRequestError extends Error {
+  readonly kind: XRequestErrorKind;
+  readonly status?: number;
+  readonly fallbackUsed: boolean;
+  readonly summary: string;
+
+  constructor(summary: string, options: {
+    kind: XRequestErrorKind;
+    status?: number;
+    fallbackUsed?: boolean;
+  }) {
+    super(summary);
+    this.name = 'XRequestError';
+    this.kind = options.kind;
+    this.status = options.status;
+    this.fallbackUsed = Boolean(options.fallbackUsed);
+    this.summary = summary;
+  }
+}
+
 const execFileAsync = promisify(execFile);
 
 export function xGraphqlOrigin(): string {
@@ -38,12 +60,18 @@ export function buildGraphqlUrl(queryId: string, operationName: string): string 
 }
 
 export function buildXGraphqlHeaders(session: XSessionAuth): Record<string, string> {
+  const origin = xGraphqlOrigin();
   return {
     authorization: `Bearer ${X_PUBLIC_BEARER}`,
     'x-csrf-token': session.csrfToken,
     'x-twitter-auth-type': 'OAuth2Session',
     'x-twitter-active-user': 'yes',
+    'x-twitter-client-language': 'en',
+    accept: '*/*',
+    'accept-language': 'en-US,en;q=0.9',
     'content-type': 'application/json',
+    origin,
+    referer: `${origin}/home`,
     'user-agent': CHROME_UA,
     cookie: session.cookieHeader ?? `ct0=${session.csrfToken}`,
   };
@@ -69,6 +97,50 @@ function shouldFallbackToCurl(error: unknown): boolean {
       'ENETUNREACH',
     ].includes(code),
   );
+}
+
+function sanitizeCookieHeader(value: string): string {
+  return value
+    .split(';')
+    .map((part) => {
+      const trimmed = part.trim();
+      if (/^(auth_token|ct0)=/i.test(trimmed)) {
+        const [name] = trimmed.split('=', 1);
+        return `${name}=[REDACTED]`;
+      }
+      return trimmed;
+    })
+    .join('; ');
+}
+
+export function sanitizeSensitiveText(input: string): string {
+  return input
+    .replace(/(authorization:\s*Bearer\s+)[^\s'"]+/gi, '$1[REDACTED]')
+    .replace(/(x-csrf-token:\s*)[^\s'"]+/gi, '$1[REDACTED]')
+    .replace(/(cookie:\s*)([^\n]+)/gi, (_match, prefix: string, value: string) => `${prefix}${sanitizeCookieHeader(value)}`)
+    .replace(/([?&;]auth_token=)[^;&\s'"]+/gi, '$1[REDACTED]')
+    .replace(/([?&;]ct0=)[^;&\s'"]+/gi, '$1[REDACTED]')
+    .replace(/(Bearer\s+)[A-Za-z0-9%._~=-]+/g, '$1[REDACTED]');
+}
+
+function classifyTransportFailure(detail: string): XRequestErrorKind {
+  if (/(401|403|forbidden|unauthorized|expired)/i.test(detail)) return 'auth';
+  if (/(429|rate limit)/i.test(detail)) return 'rate_limit';
+  if (/(recv failure|connection reset|econnreset|timed out|failed to connect|could not resolve host|enetunreach|ehostunreach)/i.test(detail)) {
+    return 'network';
+  }
+  if (/(5\d\d|bad gateway|service unavailable)/i.test(detail)) return 'upstream';
+  return 'unknown';
+}
+
+function summarizeTransportFailure(detail: string): string {
+  const lines = sanitizeSensitiveText(detail)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const curlLine = lines.find((line) => line.startsWith('curl:'));
+  if (curlLine) return `X request failed during curl fallback: ${curlLine}`;
+  return lines[0] ?? 'X request failed during curl fallback.';
 }
 
 function parseCurlHeaders(raw: string): Headers {
@@ -118,6 +190,16 @@ async function fetchViaCurl(input: string, init?: RequestInit): Promise<Response
     return new Response(body, {
       status,
       headers: parseCurlHeaders(headerRaw),
+    });
+  } catch (error) {
+    const detail = [
+      error instanceof Error ? error.message : '',
+      typeof (error as any)?.stderr === 'string' ? (error as any).stderr : '',
+      typeof (error as any)?.stdout === 'string' ? (error as any).stdout : '',
+    ].filter(Boolean).join('\n');
+    throw new XRequestError(summarizeTransportFailure(detail), {
+      kind: classifyTransportFailure(detail),
+      fallbackUsed: true,
     });
   } finally {
     await rm(tmpDir, { recursive: true, force: true });

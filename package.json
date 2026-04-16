@@ -51,7 +51,8 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "sql.js": "^1.14.1",
-    "sql.js-fts5": "^1.4.0"
+    "sql.js-fts5": "^1.4.0",
+    "x-client-transaction-id": "^0.2.0"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

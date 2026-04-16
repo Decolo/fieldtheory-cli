@@ -8,3 +8,8 @@
   - repo: `Decolo/fieldtheory-cli`
   - base: `main`
   - head: the current feature branch in the fork
+
+## Chrome Constraint
+
+- Any future Chrome usage is a hard constraint: do not connect to Chrome from scripts or tests.
+- If Chrome interaction is needed, it must go through Chrome DevTools MCP only.
