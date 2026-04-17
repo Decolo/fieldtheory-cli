@@ -5,7 +5,7 @@ import path from 'node:path';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { buildFeedIndex, countFeed, getFeedById, listFeed, searchFeed } from '../src/feed-db.js';
 import { openDb, saveDb } from '../src/db.js';
-import { twitterFeedIndexPath } from '../src/paths.js';
+import { twitterArchiveIndexPath, twitterFeedIndexPath } from '../src/paths.js';
 
 const FIXTURES = [
   {
@@ -121,5 +121,61 @@ test('searchFeed lazily rebuilds feed FTS for older indexes that lack feed_fts',
     const results = await searchFeed('newer', 5);
     assert.equal(results.length, 1);
     assert.equal(results[0].id, '2');
+  });
+});
+
+test('feed projections return only feed attachments for shared archive items', async () => {
+  await withFeedDataDir(async (dir) => {
+    await writeFile(
+      path.join(dir, 'likes.jsonl'),
+      `${JSON.stringify({
+        id: 'like-shared',
+        tweetId: '2',
+        url: 'https://x.com/alice/status/2',
+        text: 'newer',
+        authorHandle: 'alice',
+        authorName: 'Alice',
+        syncedAt: '2026-04-12T13:00:00Z',
+        likedAt: '2026-04-12T13:05:00Z',
+        postedAt: '2026-04-12T11:00:00Z',
+        ingestedVia: 'browser',
+      })}\n`,
+    );
+    await writeFile(
+      path.join(dir, 'bookmarks.jsonl'),
+      `${JSON.stringify({
+        id: 'bookmark-only',
+        tweetId: '91',
+        url: 'https://x.com/bookmark/status/91',
+        text: 'bookmark only',
+        authorHandle: 'bookmarker',
+        authorName: 'Book Marker',
+        syncedAt: '2026-04-12T10:00:00Z',
+        bookmarkedAt: '2026-04-12T10:01:00Z',
+        ingestedVia: 'graphql',
+      })}\n`,
+    );
+
+    await buildFeedIndex({ force: true });
+
+    const items = await listFeed({ limit: 10, offset: 0 });
+    assert.equal(items.some((item) => item.tweetId === '91'), false);
+    assert.equal(items.find((item) => item.tweetId === '2')?.id, '2');
+  });
+});
+
+test('feed reads fall back to the legacy source index when archive.db is missing', async () => {
+  await withFeedDataDir(async () => {
+    await buildFeedIndex({ force: true });
+    await rm(twitterArchiveIndexPath(), { force: true });
+
+    const items = await listFeed({ limit: 10, offset: 0 });
+    const item = await getFeedById('2');
+    const results = await searchFeed('newer', 5);
+
+    assert.deepEqual(items.map((entry) => entry.id), ['2', '1']);
+    assert.equal(item?.id, '2');
+    assert.equal(results.length, 1);
+    assert.equal(results[0]?.id, '2');
   });
 });

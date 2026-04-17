@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  convertTweetToArchiveItem,
   convertTweetToRecord,
+  emitBookmarkArchiveItem,
   parseBookmarksResponse,
   sanitizeBookmarkedAt,
   scoreRecord,
@@ -286,6 +288,32 @@ test('convertTweetToRecord: extracts quoted tweet snapshot', () => {
   assert.equal(result.quotedTweet!.authorHandle, 'quoteduser');
   assert.equal(result.quotedTweet!.url, 'https://x.com/quoteduser/status/5555555');
   assert.equal(result.quotedTweet!.media?.length, 1);
+});
+
+test('convertTweetToArchiveItem: emits canonical bookmark attachment metadata and normalized text', () => {
+  const result = convertTweetToArchiveItem(makeTweetResult(), NOW);
+  assert.ok(result);
+  assert.equal(result?.id, '1234567890');
+  assert.equal(result?.tweetId, '1234567890');
+  assert.equal(result?.normalizedText, 'Hello world, this is a test tweet!');
+  assert.equal(result?.sourceAttachments.bookmark?.source, 'bookmark');
+  assert.equal(result?.sourceAttachments.bookmark?.syncedAt, NOW);
+  assert.equal(result?.sourceAttachments.bookmark?.metadata?.sourceRecordId, '1234567890');
+});
+
+test('emitBookmarkArchiveItem: preserves bookmark-specific chronology fields', () => {
+  const item = emitBookmarkArchiveItem(makeRecord({
+    id: 'bookmark-row-1',
+    tweetId: '555',
+    text: 'bookmark text',
+    bookmarkedAt: '2026-03-27T00:00:00.000Z',
+    sortIndex: '987654321',
+  }));
+
+  assert.equal(item.id, '555');
+  assert.equal(item.sourceAttachments.bookmark?.sourceTimestamp, '2026-03-27T00:00:00.000Z');
+  assert.equal(item.sourceAttachments.bookmark?.orderingKey, '987654321');
+  assert.equal(item.sourceAttachments.bookmark?.metadata?.sourceRecordId, 'bookmark-row-1');
 });
 
 test('convertTweetToRecord: handles missing quoted tweet gracefully', () => {

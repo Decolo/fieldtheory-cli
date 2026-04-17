@@ -2,14 +2,15 @@ import { createHash } from 'node:crypto';
 import { createEmbeddingProvider, loadEmbeddingProviderConfig, probeEmbeddingProvider } from './embeddings.js';
 import { readJson, readJsonLines, pathExists, writeJson } from './fs.js';
 import { loadFeedPreferences } from './feed-preferences.js';
+import { rebuildArchiveStoreFromCaches } from './archive-store.js';
 import {
-  twitterBookmarksCachePath,
+  twitterArchiveCachePath,
   twitterFeedCachePath,
-  twitterLikesCachePath,
   twitterSemanticMetaPath,
 } from './paths.js';
 import { SemanticStore } from './semantic-store.js';
 import type {
+  ArchiveItem,
   BookmarkRecord,
   FeedPreferenceRule,
   FeedPreferences,
@@ -147,6 +148,34 @@ function dedupeRecords<T extends { tweetId: string }>(records: T[]): T[] {
   return Array.from(byId.values());
 }
 
+function canonicalDocumentRowsForSource(
+  source: SemanticDocumentSource,
+  items: ArchiveItem[],
+  version: string,
+): Array<Omit<SemanticDocumentRow, 'vector'>> {
+  const itemsForSource = items.filter((item) => (
+    source === 'bookmarks' ? Boolean(item.sourceAttachments.bookmark)
+      : source === 'likes' ? Boolean(item.sourceAttachments.like)
+        : Boolean(item.sourceAttachments.feed)
+  ));
+
+  return dedupeRecords(itemsForSource).map((item) => {
+    const text = buildSemanticText(item);
+    return {
+      id: semanticDocumentId(source, item.tweetId),
+      source,
+      tweetId: item.tweetId,
+      url: item.url,
+      authorHandle: item.authorHandle,
+      authorName: item.authorName,
+      postedAt: item.postedAt ?? null,
+      text,
+      textHash: hashText(text),
+      embeddingVersion: version,
+    };
+  });
+}
+
 function documentRowsForSource(
   source: SemanticDocumentSource,
   records: Array<BookmarkRecord | LikeRecord | FeedRecord>,
@@ -277,15 +306,16 @@ export async function syncSemanticIndexForRun(feedItems: FeedRecord[]): Promise<
   const config = loadEmbeddingProviderConfig();
   const provider = createEmbeddingProvider(config);
   const version = embeddingVersion(config.provider, config.model);
-  const bookmarks = await readJsonLines<BookmarkRecord>(twitterBookmarksCachePath());
-  const likes = await readJsonLines<LikeRecord>(twitterLikesCachePath());
+  await rebuildArchiveStoreFromCaches();
+  const archiveItems = await readJsonLines<ArchiveItem>(twitterArchiveCachePath());
   const feedPreferences = loadFeedPreferences();
   const store = await SemanticStore.open();
 
   let dimensions: number | undefined;
   try {
-    dimensions = (await syncDocumentSource(store, provider, 'bookmarks', documentRowsForSource('bookmarks', bookmarks, version), true)) ?? dimensions;
-    dimensions = (await syncDocumentSource(store, provider, 'likes', documentRowsForSource('likes', likes, version), true)) ?? dimensions;
+    dimensions = (await syncDocumentSource(store, provider, 'bookmarks', canonicalDocumentRowsForSource('bookmarks', archiveItems, version), true)) ?? dimensions;
+    dimensions = (await syncDocumentSource(store, provider, 'likes', canonicalDocumentRowsForSource('likes', archiveItems, version), true)) ?? dimensions;
+    dimensions = (await syncDocumentSource(store, provider, 'feed', canonicalDocumentRowsForSource('feed', archiveItems, version), true)) ?? dimensions;
     dimensions = (await syncDocumentSource(store, provider, 'feed', documentRowsForSource('feed', feedItems, version), false)) ?? dimensions;
     dimensions = (await syncPreferenceTopics(store, provider, preferenceTopicRows(feedPreferences, version))) ?? dimensions;
   } finally {
@@ -306,9 +336,9 @@ export async function rebuildSemanticIndex(): Promise<SemanticMeta> {
   const config = loadEmbeddingProviderConfig();
   const provider = createEmbeddingProvider(config);
   const version = embeddingVersion(config.provider, config.model);
-  const [bookmarks, likes, feed] = await Promise.all([
-    readJsonLines<BookmarkRecord>(twitterBookmarksCachePath()),
-    readJsonLines<LikeRecord>(twitterLikesCachePath()),
+  await rebuildArchiveStoreFromCaches();
+  const [archiveItems, feed] = await Promise.all([
+    readJsonLines<ArchiveItem>(twitterArchiveCachePath()),
     readJsonLines<FeedRecord>(twitterFeedCachePath()),
   ]);
   const feedPreferences = loadFeedPreferences();
@@ -316,9 +346,10 @@ export async function rebuildSemanticIndex(): Promise<SemanticMeta> {
 
   let dimensions: number | undefined;
   try {
-    dimensions = (await syncDocumentSource(store, provider, 'bookmarks', documentRowsForSource('bookmarks', bookmarks, version), true)) ?? dimensions;
-    dimensions = (await syncDocumentSource(store, provider, 'likes', documentRowsForSource('likes', likes, version), true)) ?? dimensions;
-    dimensions = (await syncDocumentSource(store, provider, 'feed', documentRowsForSource('feed', feed, version), true)) ?? dimensions;
+    dimensions = (await syncDocumentSource(store, provider, 'bookmarks', canonicalDocumentRowsForSource('bookmarks', archiveItems, version), true)) ?? dimensions;
+    dimensions = (await syncDocumentSource(store, provider, 'likes', canonicalDocumentRowsForSource('likes', archiveItems, version), true)) ?? dimensions;
+    dimensions = (await syncDocumentSource(store, provider, 'feed', canonicalDocumentRowsForSource('feed', archiveItems, version), true)) ?? dimensions;
+    dimensions = (await syncDocumentSource(store, provider, 'feed', documentRowsForSource('feed', feed, version), false)) ?? dimensions;
     dimensions = (await syncPreferenceTopics(store, provider, preferenceTopicRows(feedPreferences, version))) ?? dimensions;
   } finally {
     await store.close();

@@ -10,6 +10,7 @@ import {
   getLikeById,
   formatLikeSearchResults,
 } from '../src/likes-db.js';
+import { twitterArchiveIndexPath } from '../src/paths.js';
 
 const FIXTURES = [
   { id: '1', tweetId: '1', url: 'https://x.com/alice/status/1', text: 'Machine learning is transforming healthcare', authorHandle: 'alice', authorName: 'Alice Smith', syncedAt: '2026-01-01T00:00:00Z', postedAt: '2026-01-01T12:00:00Z', likedAt: '2026-03-05T12:00:00Z', engagement: { likeCount: 100, repostCount: 10 }, mediaObjects: [], links: ['https://example.com'], tags: [], ingestedVia: 'browser' },
@@ -100,6 +101,45 @@ test('buildLikesIndex updates existing rows when cache content changes', async (
     item = await getLikeById('1');
     assert.equal(item?.text, 'Updated text with richer content');
     assert.equal(item?.authorName, 'Alice Updated');
+  });
+});
+
+test('like projections exclude bookmark-only attachments for shared archive items', async () => {
+  await withIsolatedDataDir(async () => {
+    await writeFile(
+      path.join(process.env.FT_DATA_DIR!, 'bookmarks.jsonl'),
+      `${JSON.stringify({
+        id: 'bookmark-only',
+        tweetId: '77',
+        url: 'https://x.com/example/status/77',
+        text: 'Bookmark only tweet',
+        authorHandle: 'keeper',
+        authorName: 'Keeper',
+        syncedAt: '2026-04-01T00:00:00Z',
+        bookmarkedAt: '2026-04-01T01:00:00Z',
+        ingestedVia: 'graphql',
+      })}\n`,
+    );
+
+    await buildLikesIndex({ force: true });
+
+    const items = await listLikes({ limit: 10 });
+    assert.equal(items.some((item) => item.tweetId === '77'), false);
+  });
+});
+
+test('like reads fall back to the legacy source index when archive.db is missing', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildLikesIndex({ force: true });
+    await rm(twitterArchiveIndexPath(), { force: true });
+
+    const item = await getLikeById('1');
+    const results = await searchLikes({ query: 'healthcare', limit: 10 });
+
+    assert.ok(item);
+    assert.equal(item?.id, '1');
+    assert.equal(results.length, 1);
+    assert.equal(results[0]?.id, '1');
   });
 });
 

@@ -27,24 +27,24 @@ Search the user's local X/Twitter bookmark archive for content relevant to the c
 
 1. Look at what the user is working on (conversation, open files, branch name)
 2. Generate 2-3 targeted search queries
-3. Run \`ft search <query>\` for each
+3. Run \`ft bookmarks search <query>\` for each
 4. Narrow with filters if needed
 5. Summarize what you found — highlight relevant bookmarks, note patterns
 
 ## Commands
 
 \`\`\`bash
-ft search <query>              # Full-text BM25 search ("exact phrase", AND, OR, NOT)
-ft list --category <cat>       # tool, technique, research, opinion, launch, security, commerce
-ft list --domain <dom>         # ai, web-dev, startups, finance, design, devops, marketing, etc.
-ft list --author @handle       # By author
-ft list --after/--before DATE  # Date range (YYYY-MM-DD)
-ft stats                       # Collection overview
-ft viz                         # Terminal dashboard
-ft show <id>                   # Full detail for one bookmark
+ft bookmarks search <query>              # Full-text BM25 search ("exact phrase", AND, OR, NOT)
+ft bookmarks list --category <cat>       # tool, technique, research, opinion, launch, security, commerce
+ft bookmarks list --domain <dom>         # ai, web-dev, startups, finance, design, devops, marketing, etc.
+ft bookmarks list --author @handle       # By author
+ft bookmarks list --after/--before DATE  # Date range (YYYY-MM-DD)
+ft bookmarks stats                       # Collection overview
+ft bookmarks viz                         # Terminal dashboard
+ft bookmarks show <id>                   # Full detail for one bookmark
 \`\`\`
 
-Combine filters: \`ft list --category tool --domain ai --limit 10\`
+Combine filters: \`ft bookmarks list --category tool --domain ai --limit 10\`
 
 ## Guidelines
 

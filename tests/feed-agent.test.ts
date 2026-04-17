@@ -11,6 +11,7 @@ import { consumeFeedItems } from '../src/feed-consumer.js';
 import { buildLikesIndex, getLikeById } from '../src/likes-db.js';
 import { writeJson } from '../src/fs.js';
 import { saveFeedPreferences } from '../src/feed-preferences.js';
+import { twitterArchiveCachePath } from '../src/paths.js';
 
 const BOOKMARKS = [
   {
@@ -123,7 +124,7 @@ async function withAgentData(
     }
 
     if (req.url?.includes('/FavoriteTweet')) {
-      assert.equal(['fd-1', 'fd-3'].includes(parsed.variables?.tweet_id), true);
+      assert.equal(['fd-1', 'fd-3', 'shared-1', 'lk-1', 'bm-1', 'legacy-shared-1'].includes(parsed.variables?.tweet_id), true);
       const status = favoriteStatuses.shift() ?? 200;
       res.writeHead(status, { 'content-type': status === 200 ? 'application/json' : 'text/plain' });
       res.end(status === 200 ? JSON.stringify({ data: { favorite_tweet: 'Done' } }) : 'temporary like failure');
@@ -131,7 +132,7 @@ async function withAgentData(
     }
 
     if (req.url?.includes('/CreateBookmark')) {
-      assert.equal(['fd-1', 'fd-3'].includes(parsed.variables?.tweet_id), true);
+      assert.equal(['fd-1', 'fd-3', 'shared-1', 'lk-1', 'bm-1', 'legacy-shared-1'].includes(parsed.variables?.tweet_id), true);
       const status = bookmarkStatuses.shift() ?? 200;
       res.writeHead(status, { 'content-type': status === 200 ? 'application/json' : 'text/plain' });
       res.end(status === 200 ? JSON.stringify({ data: { tweet_bookmark_put: 'Done' } }) : 'temporary bookmark failure');
@@ -258,6 +259,203 @@ test('explicit feed preferences override weak history and drive bookmark decisio
 
       assert.equal(result.bookmarked, 1);
       assert.equal(requests.filter((url) => url.includes('/CreateBookmark')).length, 1);
+    } finally {
+      delete process.env.FT_X_API_ORIGIN;
+      delete process.env.FT_EMBEDDING_API_KEY;
+      delete process.env.FT_EMBEDDING_BASE_URL;
+    }
+  });
+});
+
+test('runFeedConsumer treats canonical archive attachments as idempotency state even if legacy caches are absent', async () => {
+  await withAgentData(async (dir, origin, requests) => {
+    process.env.FT_X_API_ORIGIN = origin;
+    process.env.FT_EMBEDDING_API_KEY = 'test-key';
+    process.env.FT_EMBEDDING_BASE_URL = origin;
+    saveFeedPreferences({
+      like: {
+        prefer: [{ kind: 'author', value: 'alice', createdAt: '2026-04-15T00:00:00Z' }],
+        avoid: [],
+      },
+      bookmark: {
+        prefer: [{ kind: 'domain', value: 'blog.example.com', createdAt: '2026-04-15T00:00:00Z' }],
+        avoid: [],
+      },
+    });
+    try {
+      const sharedBookmark = {
+        id: 'bm-shared',
+        tweetId: 'shared-1',
+        url: 'https://x.com/alice/status/shared-1',
+        text: 'AI agents for code review and browser automation',
+        authorHandle: 'alice',
+        authorName: 'Alice',
+        postedAt: '2026-04-10T00:00:00Z',
+        bookmarkedAt: '2026-04-11T00:00:00Z',
+        syncedAt: '2026-04-11T00:00:00Z',
+        links: ['https://blog.example.com/shared'],
+        mediaObjects: [],
+        tags: [],
+        ingestedVia: 'graphql',
+      };
+      const sharedLike = {
+        id: 'lk-shared',
+        tweetId: 'shared-1',
+        url: 'https://x.com/alice/status/shared-1',
+        text: 'AI agents for code review and browser automation',
+        authorHandle: 'alice',
+        authorName: 'Alice',
+        postedAt: '2026-04-10T00:00:00Z',
+        likedAt: '2026-04-12T00:00:00Z',
+        syncedAt: '2026-04-12T00:00:00Z',
+        links: ['https://blog.example.com/shared'],
+        mediaObjects: [],
+        tags: [],
+        ingestedVia: 'graphql',
+      };
+
+      await writeFile(path.join(dir, 'bookmarks.jsonl'), '');
+      await writeFile(path.join(dir, 'likes.jsonl'), '');
+      await writeJson(path.join(dir, 'bookmarks-meta.json'), { provider: 'twitter', schemaVersion: 1, totalBookmarks: 0 });
+      await writeJson(path.join(dir, 'likes-meta.json'), { provider: 'twitter', schemaVersion: 1, totalLikes: 0 });
+      await writeFile(twitterArchiveCachePath(), `${JSON.stringify({
+        id: 'shared-1',
+        tweetId: 'shared-1',
+        url: sharedBookmark.url,
+        text: sharedBookmark.text,
+        authorHandle: sharedBookmark.authorHandle,
+        authorName: sharedBookmark.authorName,
+        postedAt: sharedBookmark.postedAt,
+        syncedAt: sharedLike.syncedAt,
+        links: sharedBookmark.links,
+        mediaObjects: sharedBookmark.mediaObjects,
+        tags: sharedBookmark.tags,
+        ingestedVia: 'graphql',
+        sourceAttachments: {
+          bookmark: {
+            source: 'bookmark',
+            sourceTimestamp: sharedBookmark.bookmarkedAt,
+            syncedAt: sharedBookmark.syncedAt,
+            ingestedVia: 'graphql',
+            metadata: { sourceRecordId: sharedBookmark.id },
+          },
+          like: {
+            source: 'like',
+            sourceTimestamp: sharedLike.likedAt,
+            syncedAt: sharedLike.syncedAt,
+            ingestedVia: 'graphql',
+            metadata: { sourceRecordId: sharedLike.id },
+          },
+        },
+      })}\n`);
+
+      const result = await consumeFeedItems([
+        {
+          id: 'fd-shared',
+          tweetId: 'shared-1',
+          url: 'https://x.com/alice/status/shared-1',
+          text: 'AI agents for code review and browser automation',
+          authorHandle: 'alice',
+          authorName: 'Alice',
+          postedAt: '2026-04-13T00:00:00Z',
+          syncedAt: '2026-04-13T00:00:00Z',
+          links: ['https://blog.example.com/shared'],
+          tags: [],
+          ingestedVia: 'graphql',
+        },
+      ], {
+        candidateLimit: 1,
+        csrfToken: 'ct0-token',
+        cookieHeader: 'ct0=ct0-token; auth_token=auth',
+      });
+
+      assert.equal(result.evaluated, 1);
+      assert.equal(result.liked, 0);
+      assert.equal(result.bookmarked, 0);
+      assert.equal(result.skipped, 1);
+      assert.equal(requests.filter((url) => url.includes('/FavoriteTweet')).length, 0);
+      assert.equal(requests.filter((url) => url.includes('/CreateBookmark')).length, 0);
+    } finally {
+      delete process.env.FT_X_API_ORIGIN;
+      delete process.env.FT_EMBEDDING_API_KEY;
+      delete process.env.FT_EMBEDDING_BASE_URL;
+    }
+  });
+});
+
+test('runFeedConsumer falls back to legacy like and bookmark caches when archive cache is missing', async () => {
+  await withAgentData(async (dir, origin, requests) => {
+    process.env.FT_X_API_ORIGIN = origin;
+    process.env.FT_EMBEDDING_API_KEY = 'test-key';
+    process.env.FT_EMBEDDING_BASE_URL = origin;
+    try {
+      const legacyBookmark = {
+        id: 'bm-legacy-shared',
+        tweetId: 'legacy-shared-1',
+        url: 'https://x.com/alice/status/legacy-shared-1',
+        text: 'Practical AI agents and tooling for code review',
+        authorHandle: 'alice',
+        authorName: 'Alice',
+        postedAt: '2026-04-12T00:00:00Z',
+        bookmarkedAt: '2026-04-13T00:00:00Z',
+        syncedAt: '2026-04-13T00:00:00Z',
+        links: ['https://blog.example.com/practical-agents'],
+        mediaObjects: [],
+        tags: [],
+        ingestedVia: 'graphql',
+      };
+      const legacyLike = {
+        id: 'lk-legacy-shared',
+        tweetId: 'legacy-shared-1',
+        url: 'https://x.com/alice/status/legacy-shared-1',
+        text: 'Practical AI agents and tooling for code review',
+        authorHandle: 'alice',
+        authorName: 'Alice',
+        postedAt: '2026-04-12T00:00:00Z',
+        likedAt: '2026-04-13T00:00:00Z',
+        syncedAt: '2026-04-13T00:00:00Z',
+        links: ['https://blog.example.com/practical-agents'],
+        mediaObjects: [],
+        tags: [],
+        ingestedVia: 'graphql',
+      };
+
+      await writeFile(path.join(dir, 'bookmarks.jsonl'), `${JSON.stringify(legacyBookmark)}\n`);
+      await writeFile(path.join(dir, 'likes.jsonl'), `${JSON.stringify(legacyLike)}\n`);
+      await writeJson(path.join(dir, 'bookmarks-meta.json'), { provider: 'twitter', schemaVersion: 1, totalBookmarks: 1 });
+      await writeJson(path.join(dir, 'likes-meta.json'), { provider: 'twitter', schemaVersion: 1, totalLikes: 1 });
+      await rm(twitterArchiveCachePath(), { force: true });
+
+      const result = await runFeedConsumer([
+        {
+          id: 'fd-fallback',
+          tweetId: 'legacy-shared-1',
+          url: 'https://x.com/alice/status/legacy-shared-1',
+          text: 'Practical AI agents and tooling for code review',
+          authorHandle: 'alice',
+          authorName: 'Alice',
+          postedAt: '2026-04-13T00:00:00Z',
+          syncedAt: '2026-04-13T00:00:00Z',
+          links: ['https://blog.example.com/practical-agents'],
+          tags: [],
+          ingestedVia: 'graphql',
+        },
+      ], {
+        candidateLimit: 1,
+        csrfToken: 'ct0-token',
+        cookieHeader: 'ct0=ct0-token; auth_token=auth',
+      });
+
+      assert.equal(result.evaluated, 1);
+      assert.equal(result.liked, 0);
+      assert.equal(result.bookmarked, 0);
+      assert.equal(result.skipped, 1);
+      assert.equal(requests.filter((url) => url.includes('/FavoriteTweet')).length, 0);
+      assert.equal(requests.filter((url) => url.includes('/CreateBookmark')).length, 0);
+
+      const logs = await listFeedAgentLog(5);
+      assert.equal(logs.some((entry) => entry.tweetId === 'legacy-shared-1' && entry.actions.like === 'already-done'), true);
+      assert.equal(logs.some((entry) => entry.tweetId === 'legacy-shared-1' && entry.actions.bookmark === 'already-done'), true);
     } finally {
       delete process.env.FT_X_API_ORIGIN;
       delete process.env.FT_EMBEDDING_API_KEY;

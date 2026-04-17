@@ -25,6 +25,36 @@ const BOOKMARKS = [
     media: [],
     ingestedVia: 'browser',
   },
+  {
+    id: 'bookmark-strong',
+    tweetId: 'bookmark-strong',
+    url: 'https://x.com/alice/status/bookmark-strong',
+    text: 'Claude Code local agent workflow playbook with best practices and evaluation loops.',
+    authorHandle: 'alice',
+    authorName: 'Alice',
+    syncedAt: '2026-04-04T00:00:00Z',
+    postedAt: '2026-04-04T00:00:00Z',
+    bookmarkedAt: '2026-04-04T00:00:00Z',
+    links: [],
+    tags: [],
+    media: [],
+    ingestedVia: 'browser',
+  },
+  {
+    id: 'bookmark-weak',
+    tweetId: 'bookmark-weak',
+    url: 'https://x.com/alice/status/bookmark-weak',
+    text: 'Claude notes.',
+    authorHandle: 'alice',
+    authorName: 'Alice',
+    syncedAt: '2026-04-05T00:00:00Z',
+    postedAt: '2026-04-05T00:00:00Z',
+    bookmarkedAt: '2026-04-05T00:00:00Z',
+    links: [],
+    tags: [],
+    media: [],
+    ingestedVia: 'browser',
+  },
 ];
 
 const LIKES = [
@@ -112,10 +142,11 @@ test('runHybridSearch returns mixed-source topic results and dedupes shared twee
       limit: 10,
     });
 
-    assert.equal(result.results.length, 2);
     assert.equal(result.results[0].id, 'shared-1');
     assert.deepEqual(result.results[0].sources, ['bookmarks', 'likes']);
-    assert.equal(result.results[1].source, 'feed');
+    assert.equal(result.results[0].sourceCount, 2);
+    assert.equal(result.results.filter((item) => item.tweetId === 'shared-1').length, 1);
+    assert.ok(result.results.some((item) => item.source === 'feed'));
   });
 });
 
@@ -131,8 +162,53 @@ test('runHybridSearch supports natural-language queries and action ranking', asy
     assert.equal(result.results[0].id, 'shared-1');
     assert.equal(result.results[0].isBookmarked, true);
     assert.equal(result.results[0].isLiked, true);
+    assert.equal(result.results[0].sourceDates.bookmarks, '2026-04-01T00:00:00Z');
+    assert.equal(result.results[0].sourceDates.likes, '2026-04-02T00:00:00Z');
     assert.match(result.summary ?? '', /Top results|Claude|local/i);
     assert.equal(result.usedEngine, false);
     assert.deepEqual(result.expansions, []);
+  });
+});
+
+test('runHybridSearch applies archive source filters against canonical items', async () => {
+  await withHybridArchiveData(async () => {
+    const result = await runHybridSearch({
+      query: 'claude code',
+      scope: 'bookmarks',
+      limit: 10,
+    });
+
+    const shared = result.results.find((item) => item.tweetId === 'shared-1');
+    assert.ok(shared);
+    assert.equal(shared.source, 'bookmarks');
+    assert.deepEqual(shared.sources, ['bookmarks', 'likes']);
+    assert.ok(result.results.every((item) => item.sources.includes('bookmarks')));
+  });
+});
+
+test('runHybridSearch preserves lexical ordering and filtered primary source for multi-source items', async () => {
+  await withHybridArchiveData(async () => {
+    const ranked = await runHybridSearch({
+      query: 'claude code local agent workflow',
+      scope: 'bookmarks',
+      limit: 10,
+    });
+
+    const strongIndex = ranked.results.findIndex((item) => item.tweetId === 'bookmark-strong');
+    const weakIndex = ranked.results.findIndex((item) => item.tweetId === 'bookmark-weak');
+    assert.notEqual(strongIndex, -1);
+    assert.notEqual(weakIndex, -1);
+    assert.ok(strongIndex < weakIndex);
+
+    const likesScoped = await runHybridSearch({
+      query: 'claude code',
+      scope: 'likes',
+      limit: 10,
+    });
+
+    assert.equal(likesScoped.results.length, 1);
+    assert.equal(likesScoped.results[0].tweetId, 'shared-1');
+    assert.equal(likesScoped.results[0].source, 'likes');
+    assert.deepEqual(likesScoped.results[0].sources, ['bookmarks', 'likes']);
   });
 });

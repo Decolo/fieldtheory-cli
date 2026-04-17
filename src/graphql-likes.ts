@@ -1,10 +1,12 @@
+import { archiveItemFromLikeRecord } from './archive-core.js';
+import { rebuildArchiveStoreFromCaches } from './archive-store.js';
 import { readJsonLines, writeJsonLines, readJson, writeJson, pathExists } from './fs.js';
 import { ensureDataDir, twitterLikesBackfillStatePath, twitterLikesCachePath, twitterLikesMetaPath } from './paths.js';
 import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
 import { extractFirefoxXCookies } from './firefox-cookies.js';
 import { fetchXResource } from './x-graphql.js';
-import type { LikeRecord, LikesBackfillState, LikesCacheMeta } from './types.js';
+import type { ArchiveItem, LikeRecord, LikesBackfillState, LikesCacheMeta } from './types.js';
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
 
@@ -122,6 +124,25 @@ interface LikesPageResult {
 }
 
 type FavoriteTweet = Record<string, any>;
+
+function withLikeSourceRecordMetadata(item: ArchiveItem, sourceRecordId: string): ArchiveItem {
+  return {
+    ...item,
+    id: item.tweetId || item.id,
+    sourceAttachments: {
+      ...item.sourceAttachments,
+      like: item.sourceAttachments.like
+        ? {
+            ...item.sourceAttachments.like,
+            metadata: {
+              ...(item.sourceAttachments.like.metadata ?? {}),
+              sourceRecordId,
+            },
+          }
+        : undefined,
+    },
+  };
+}
 
 function parseSnowflake(value?: string | null): bigint | null {
   if (!value || !/^\d+$/.test(value)) return null;
@@ -305,6 +326,15 @@ export function convertLikedTweetToRecord(tweet: FavoriteTweet, now: string): Li
     tags: [],
     ingestedVia: 'browser',
   };
+}
+
+export function emitLikeArchiveItem(record: LikeRecord): ArchiveItem {
+  return withLikeSourceRecordMetadata(archiveItemFromLikeRecord(record), record.id);
+}
+
+export function convertLikedTweetToArchiveItem(tweet: FavoriteTweet, now: string): ArchiveItem | null {
+  const record = convertLikedTweetToRecord(tweet, now);
+  return record ? emitLikeArchiveItem(record) : null;
 }
 
 export function parseLikesResponse(json: unknown, now?: string): LikesPageResult {
@@ -541,6 +571,7 @@ export async function syncLikesGraphQL(options: LikesSyncOptions = {}): Promise<
     stopReason,
     lastRunAt: syncedAt,
   }));
+  await rebuildArchiveStoreFromCaches({ forceIndex: true });
 
   options.onProgress?.({
     page,

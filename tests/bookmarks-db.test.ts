@@ -1,11 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildIndex, searchBookmarks, getStats, formatSearchResults, getBookmarkById } from '../src/bookmarks-db.js';
+import {
+  buildIndex,
+  searchBookmarks,
+  getStats,
+  formatSearchResults,
+  getBookmarkById,
+  listBookmarks,
+  countBookmarks,
+} from '../src/bookmarks-db.js';
 import { openDb, saveDb } from '../src/db.js';
-import { twitterBookmarksIndexPath } from '../src/paths.js';
+import { twitterArchiveIndexPath, twitterBookmarksIndexPath } from '../src/paths.js';
 
 const FIXTURES = [
   { id: '1', tweetId: '1', url: 'https://x.com/alice/status/1', text: 'Machine learning is transforming healthcare', authorHandle: 'alice', authorName: 'Alice Smith', syncedAt: '2026-01-01T00:00:00Z', postedAt: '2026-01-01T12:00:00Z', language: 'en', engagement: { likeCount: 100, repostCount: 10 }, mediaObjects: [], links: ['https://example.com'], tags: [], ingestedVia: 'graphql' },
@@ -115,6 +123,194 @@ test('searchBookmarks: no results for unmatched query', async () => {
     const results = await searchBookmarks({ query: 'cryptocurrency', limit: 10 });
     assert.equal(results.length, 0);
   });
+});
+
+test('bookmark projections stay source-scoped when the same tweet exists in multiple sources', async () => {
+  await withIsolatedDataDir(async () => {
+    await writeFile(
+      path.join(process.env.FT_DATA_DIR!, 'likes.jsonl'),
+      `${JSON.stringify({
+        id: 'like-1',
+        tweetId: '1',
+        url: 'https://x.com/alice/status/1',
+        text: 'Machine learning is transforming healthcare',
+        authorHandle: 'alice',
+        authorName: 'Alice Smith',
+        syncedAt: '2026-04-01T00:00:00Z',
+        likedAt: '2026-04-01T12:00:00Z',
+        postedAt: '2026-01-01T12:00:00Z',
+        ingestedVia: 'browser',
+      })}\n`,
+    );
+
+    await buildIndex({ force: true });
+
+    const bookmark = await getBookmarkById('1');
+    const searchResults = await searchBookmarks({ query: 'healthcare', limit: 10 });
+
+    assert.ok(bookmark);
+    assert.equal(bookmark?.id, '1');
+    assert.equal(searchResults.length, 1);
+    assert.equal(searchResults[0].id, '1');
+  });
+});
+
+test('bookmark reads fall back to the legacy source index when archive.db is missing', async () => {
+  await withIsolatedDataDir(async () => {
+    await buildIndex({ force: true });
+    await rm(twitterArchiveIndexPath(), { force: true });
+
+    const bookmark = await getBookmarkById('1');
+    const searchResults = await searchBookmarks({ query: 'healthcare', limit: 10 });
+
+    assert.ok(bookmark);
+    assert.equal(bookmark?.id, '1');
+    assert.equal(searchResults.length, 1);
+    assert.equal(searchResults[0]?.id, '1');
+  });
+});
+
+test('bookmark date filters use postedAt precedence consistently across search, list, and count', async () => {
+  const fixtures = [
+    {
+      id: 'after-mismatch',
+      tweetId: '101',
+      url: 'https://x.com/alice/status/101',
+      text: 'Date filter after regression case',
+      authorHandle: 'alice',
+      authorName: 'Alice',
+      syncedAt: '2026-04-01T00:00:00Z',
+      postedAt: '2026-01-10T12:00:00Z',
+      bookmarkedAt: '2026-03-10T12:00:00Z',
+      mediaObjects: [],
+      links: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+    {
+      id: 'before-mismatch',
+      tweetId: '102',
+      url: 'https://x.com/bob/status/102',
+      text: 'Date filter before regression case',
+      authorHandle: 'bob',
+      authorName: 'Bob',
+      syncedAt: '2026-04-02T00:00:00Z',
+      postedAt: '2026-03-10T12:00:00Z',
+      bookmarkedAt: '2026-01-10T12:00:00Z',
+      mediaObjects: [],
+      links: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+    {
+      id: 'control',
+      tweetId: '103',
+      url: 'https://x.com/carol/status/103',
+      text: 'Date filter control case',
+      authorHandle: 'carol',
+      authorName: 'Carol',
+      syncedAt: '2026-04-03T00:00:00Z',
+      postedAt: '2026-02-15T12:00:00Z',
+      bookmarkedAt: '2026-02-16T12:00:00Z',
+      mediaObjects: [],
+      links: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+  ];
+
+  await withIsolatedDataDir(async () => {
+    await buildIndex({ force: true });
+
+    const afterFilters = { query: 'date', after: '2026-02-01', limit: 10 };
+    const beforeFilters = { query: 'date', before: '2026-02-01', limit: 10 };
+
+    const afterSearch = await searchBookmarks(afterFilters);
+    const afterList = await listBookmarks(afterFilters);
+    const afterCount = await countBookmarks(afterFilters);
+    assert.deepEqual(afterSearch.map((row) => row.id).sort(), ['before-mismatch', 'control']);
+    assert.deepEqual(afterList.map((row) => row.id).sort(), ['before-mismatch', 'control']);
+    assert.equal(afterCount, 2);
+
+    const beforeSearch = await searchBookmarks(beforeFilters);
+    const beforeList = await listBookmarks(beforeFilters);
+    const beforeCount = await countBookmarks(beforeFilters);
+    assert.deepEqual(beforeSearch.map((row) => row.id), ['after-mismatch']);
+    assert.deepEqual(beforeList.map((row) => row.id), ['after-mismatch']);
+    assert.equal(beforeCount, 1);
+  }, fixtures);
+});
+
+test('bookmark date filters stay consistent when bookmark reads fall back to archive projections', async () => {
+  const fixtures = [
+    {
+      id: 'after-mismatch',
+      tweetId: '101',
+      url: 'https://x.com/alice/status/101',
+      text: 'Date filter after regression case',
+      authorHandle: 'alice',
+      authorName: 'Alice',
+      syncedAt: '2026-04-01T00:00:00Z',
+      postedAt: '2026-01-10T12:00:00Z',
+      bookmarkedAt: '2026-03-10T12:00:00Z',
+      mediaObjects: [],
+      links: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+    {
+      id: 'before-mismatch',
+      tweetId: '102',
+      url: 'https://x.com/bob/status/102',
+      text: 'Date filter before regression case',
+      authorHandle: 'bob',
+      authorName: 'Bob',
+      syncedAt: '2026-04-02T00:00:00Z',
+      postedAt: '2026-03-10T12:00:00Z',
+      bookmarkedAt: '2026-01-10T12:00:00Z',
+      mediaObjects: [],
+      links: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+    {
+      id: 'control',
+      tweetId: '103',
+      url: 'https://x.com/carol/status/103',
+      text: 'Date filter control case',
+      authorHandle: 'carol',
+      authorName: 'Carol',
+      syncedAt: '2026-04-03T00:00:00Z',
+      postedAt: '2026-02-15T12:00:00Z',
+      bookmarkedAt: '2026-02-16T12:00:00Z',
+      mediaObjects: [],
+      links: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    },
+  ];
+
+  await withIsolatedDataDir(async () => {
+    await buildIndex({ force: true });
+    await rm(twitterBookmarksIndexPath(), { force: true });
+
+    const afterFilters = { query: 'date', after: '2026-02-01', limit: 10 };
+    const beforeFilters = { query: 'date', before: '2026-02-01', limit: 10 };
+
+    const afterSearch = await searchBookmarks(afterFilters);
+    const afterList = await listBookmarks(afterFilters);
+    const afterCount = await countBookmarks(afterFilters);
+    assert.deepEqual(afterSearch.map((row) => row.id).sort(), ['before-mismatch', 'control']);
+    assert.deepEqual(afterList.map((row) => row.id).sort(), ['before-mismatch', 'control']);
+    assert.equal(afterCount, 2);
+
+    const beforeSearch = await searchBookmarks(beforeFilters);
+    const beforeList = await listBookmarks(beforeFilters);
+    const beforeCount = await countBookmarks(beforeFilters);
+    assert.deepEqual(beforeSearch.map((row) => row.id), ['after-mismatch']);
+    assert.deepEqual(beforeList.map((row) => row.id), ['after-mismatch']);
+    assert.equal(beforeCount, 1);
+  }, fixtures);
 });
 
 test('getStats returns correct aggregate data', async () => {

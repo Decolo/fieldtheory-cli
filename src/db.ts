@@ -39,3 +39,15 @@ export function saveDb(db: Database, filePath: string): void {
   fs.writeFileSync(tmp, Buffer.from(data));
   fs.renameSync(tmp, filePath);
 }
+
+export function runInTransaction<T>(db: Database, fn: () => T): T {
+  db.run('BEGIN TRANSACTION');
+  try {
+    const result = fn();
+    db.run('COMMIT');
+    return result;
+  } catch (error) {
+    db.run('ROLLBACK');
+    throw error;
+  }
+}

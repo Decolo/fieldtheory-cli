@@ -1,6 +1,39 @@
 import type { HybridSearchMode, HybridSearchResult, HybridSearchScope, HybridSearchSource } from './search-types.js';
 
-export type ArchiveSource = 'bookmarks' | 'likes';
+export type LegacyArchiveSource = 'bookmarks' | 'likes';
+export type ArchiveSource = LegacyArchiveSource | 'feed';
+export type ArchiveFilter = ArchiveSource | 'all';
+
+export interface ApiArchiveSourceAttachment {
+  source: HybridSearchSource;
+  sourceTimestamp?: string | null;
+  orderingKey?: string | null;
+  fetchPage?: number | null;
+  fetchPosition?: number | null;
+  syncedAt: string;
+  ingestedVia?: string | null;
+  sourceRecordId?: string;
+}
+
+export interface ApiArchiveItem {
+  id: string;
+  tweetId: string;
+  url: string;
+  text: string;
+  authorHandle?: string;
+  authorName?: string;
+  authorProfileImageUrl?: string;
+  postedAt?: string | null;
+  syncedAt: string;
+  source: HybridSearchSource;
+  sources: HybridSearchSource[];
+  sourceCount: number;
+  sourceDates: Partial<Record<HybridSearchSource, string | null>>;
+  attachments: Partial<Record<HybridSearchSource, ApiArchiveSourceAttachment>>;
+  isBookmarked: boolean;
+  isLiked: boolean;
+  isInFeed: boolean;
+}
 
 export interface ApiStatusBucket {
   total: number;
@@ -10,17 +43,27 @@ export interface ApiStatusBucket {
 
 export interface ApiStatusResponse {
   dataDir: string;
+  archive: ApiStatusBucket;
   bookmarks: ApiStatusBucket;
   likes: ApiStatusBucket;
   feed: ApiStatusBucket;
 }
 
 export interface ApiListResponse<T> {
-  source: ArchiveSource;
+  source: LegacyArchiveSource;
   total: number;
   limit: number;
   offset: number;
   items: T[];
+}
+
+export interface ApiArchiveListResponse {
+  resource: 'archive';
+  source: ArchiveFilter;
+  total: number;
+  limit: number;
+  offset: number;
+  items: ApiArchiveItem[];
 }
 
 export interface ApiHybridSearchResponse {

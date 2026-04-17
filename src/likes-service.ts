@@ -1,4 +1,5 @@
 import { getTwitterLikesStatus, latestLikeSyncAt } from './likes.js';
+import { countLikes } from './likes-db.js';
 
 export interface LikesStatusView {
   likeCount: number;
@@ -9,8 +10,12 @@ export interface LikesStatusView {
 
 export async function getLikesStatusView(): Promise<LikesStatusView> {
   const status = await getTwitterLikesStatus();
+  let likeCount = status.totalLikes;
+  try {
+    likeCount = await countLikes();
+  } catch {}
   return {
-    likeCount: status.totalLikes,
+    likeCount,
     lastUpdated: latestLikeSyncAt(status),
     mode: 'Full archive sync via browser session',
     cachePath: status.cachePath,

@@ -1,3 +1,5 @@
+import { archiveItemFromBookmarkRecord } from './archive-core.js';
+import { rebuildArchiveStoreFromCaches } from './archive-store.js';
 import { ensureDir, readJsonLines, writeJsonLines, readJson, writeJson, pathExists } from './fs.js';
 import { ensureDataDir, twitterBookmarksCachePath, twitterBookmarksMetaPath, twitterBackfillStatePath } from './paths.js';
 import { loadChromeSessionConfig } from './config.js';
@@ -5,7 +7,7 @@ import { extractChromeXCookies } from './chrome-cookies.js';
 import { extractFirefoxXCookies } from './firefox-cookies.js';
 import { parseTimestampMs } from './date-utils.js';
 import { fetchXResource } from './x-graphql.js';
-import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
+import type { ArchiveItem, BookmarkBackfillState, BookmarkCacheMeta, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText } from './bookmarks-db.js';
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
@@ -211,6 +213,29 @@ interface PageResult {
   nextCursor?: string;
 }
 
+function withBookmarkSourceRecordMetadata(item: ArchiveItem, sourceRecordId: string): ArchiveItem {
+  return {
+    ...item,
+    id: item.tweetId || item.id,
+    sourceAttachments: {
+      ...item.sourceAttachments,
+      bookmark: item.sourceAttachments.bookmark
+        ? {
+            ...item.sourceAttachments.bookmark,
+            metadata: {
+              ...(item.sourceAttachments.bookmark.metadata ?? {}),
+              sourceRecordId,
+            },
+          }
+        : undefined,
+    },
+  };
+}
+
+export function emitBookmarkArchiveItem(record: BookmarkRecord): ArchiveItem {
+  return withBookmarkSourceRecordMetadata(archiveItemFromBookmarkRecord(record), record.id);
+}
+
 export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRecord | null {
   const tweet = tweetResult.tweet ?? tweetResult;
   const legacy = tweet?.legacy;
@@ -338,6 +363,11 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
     tags: [],
     ingestedVia: 'graphql',
   };
+}
+
+export function convertTweetToArchiveItem(tweetResult: any, now: string): ArchiveItem | null {
+  const record = convertTweetToRecord(tweetResult, now);
+  return record ? emitBookmarkArchiveItem(record) : null;
 }
 
 export function parseBookmarksResponse(json: any, now?: string): PageResult {
@@ -687,6 +717,7 @@ export async function syncBookmarksGraphQL(
     lastRunAt: syncedAt,
     lastCursor: savedCursor,
   }));
+  await rebuildArchiveStoreFromCaches({ forceIndex: true });
 
   options.onProgress?.({
     page,
@@ -711,7 +742,7 @@ export async function syncBookmarksGraphQL(
 
 // ── Gap-fill: backfill missing data for existing bookmarks ────────────
 
-const SYNDICATION_URL = 'https://cdn.syndication.twimg.com/tweet-result';
+const SYNDICATION_URL = process.env.FT_X_SYNDICATION_URL?.trim() || 'https://cdn.syndication.twimg.com/tweet-result';
 
 interface SyndicationResult {
   snapshot: QuotedTweetSnapshot | null;
@@ -766,6 +797,33 @@ async function fetchTweetViaSyndication(tweetId: string): Promise<SyndicationRes
     return { snapshot: null, status, httpStatus: response.status };
   }
   return { snapshot: null, status: 'rate_limited' };
+}
+
+export async function fetchBookmarkRecordViaSyndication(
+  tweetId: string,
+  bookmarkedAt = new Date().toISOString(),
+): Promise<BookmarkRecord | null> {
+  const result = await fetchTweetViaSyndication(tweetId);
+  const snapshot = result.snapshot;
+  if (!snapshot) return null;
+
+  return {
+    id: snapshot.id,
+    tweetId: snapshot.id,
+    url: snapshot.url,
+    text: snapshot.text,
+    authorHandle: snapshot.authorHandle,
+    authorName: snapshot.authorName,
+    authorProfileImageUrl: snapshot.authorProfileImageUrl,
+    postedAt: snapshot.postedAt ?? null,
+    bookmarkedAt,
+    syncedAt: bookmarkedAt,
+    media: snapshot.media ?? [],
+    mediaObjects: snapshot.mediaObjects ?? [],
+    links: [],
+    tags: [],
+    ingestedVia: 'browser',
+  };
 }
 
 // Text >= 275 chars may be truncated by Twitter's legacy.full_text limit
@@ -913,6 +971,7 @@ export async function syncGaps(options?: {
   await writeJsonLines(cachePath, records);
   if (dbQuotedUpdates.length > 0) await updateQuotedTweets(dbQuotedUpdates);
   if (dbTextUpdates.length > 0) await updateBookmarkText(dbTextUpdates);
+  await rebuildArchiveStoreFromCaches({ forceIndex: true });
 
   return {
     quotedTweetsFilled: quotedFetched,

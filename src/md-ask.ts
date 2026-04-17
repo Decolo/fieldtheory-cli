@@ -16,7 +16,7 @@ import {
   mdIndexPath, mdLogPath, mdConceptsDir, mdCategoriesDir,
   mdDomainsDir, mdEntitiesDir, mdDir,
 } from './paths.js';
-import { searchBookmarks } from './bookmarks-db.js';
+import { runHybridSearch } from './hybrid-search.js';
 import { resolveEngine, invokeEngineAsync } from './engine.js';
 import { buildAskPrompt, type MdBookmark } from './md-prompts.js';
 import { slug, logEntry } from './md.js';
@@ -66,9 +66,9 @@ async function selectRelevantPages(question: string): Promise<string[]> {
   ]);
 
   try {
-    const ftsResults = await searchBookmarks({ query: question, limit: 50 });
+    const ftsResults = await runHybridSearch({ query: question, limit: 50, scope: 'all' });
     const ftsBoosts = new Set<string>();
-    for (const r of ftsResults) {
+    for (const r of ftsResults.results) {
       if (r.authorHandle) ftsBoosts.add(`entities/${slug(r.authorHandle)}`);
     }
     for (const page of allPages) {
@@ -134,9 +134,9 @@ export async function askMd(question: string, options: AskOptions = {}): Promise
   }
 
   // ── L3: raw FTS5 bookmark results ───────────────────────────────────────
-  progress('Searching bookmarks...');
-  const rawResults = await searchBookmarks({ query: question, limit: MAX_RAW_BOOKMARKS });
-  const rawBookmarks: MdBookmark[] = rawResults.map((r) => ({
+  progress('Searching archive...');
+  const rawResults = await runHybridSearch({ query: question, limit: MAX_RAW_BOOKMARKS, scope: 'all' });
+  const rawBookmarks: MdBookmark[] = rawResults.results.map((r) => ({
     id: r.id,
     url: r.url,
     text: r.text,
@@ -160,7 +160,7 @@ export async function askMd(question: string, options: AskOptions = {}): Promise
       `---`,
       `tags: [ft/concept]`,
       `question: "${question.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ')}"`,
-      `source_type: bookmarks`,
+      `source_type: archive`,
       `last_updated: ${now}`,
       `---`,
       ``,

@@ -1,8 +1,41 @@
-export type ArchiveSource = 'bookmarks' | 'likes';
+export type LegacyArchiveSource = 'bookmarks' | 'likes';
+export type ArchiveSource = LegacyArchiveSource | 'feed';
+export type ArchiveFilter = ArchiveSource | 'all';
 export type HybridSearchSource = 'bookmarks' | 'likes' | 'feed';
 export type HybridSearchMode = 'topic' | 'action';
 export type HybridSearchScope = HybridSearchSource | 'all';
 export type ViewSource = 'dashboard' | 'search' | ArchiveSource;
+
+export interface ArchiveSourceAttachment {
+  source: HybridSearchSource;
+  sourceTimestamp?: string | null;
+  orderingKey?: string | null;
+  fetchPage?: number | null;
+  fetchPosition?: number | null;
+  syncedAt: string;
+  ingestedVia?: string | null;
+  sourceRecordId?: string;
+}
+
+export interface ArchiveItem {
+  id: string;
+  tweetId: string;
+  url: string;
+  text: string;
+  authorHandle?: string;
+  authorName?: string;
+  authorProfileImageUrl?: string;
+  postedAt?: string | null;
+  syncedAt: string;
+  source: HybridSearchSource;
+  sources: HybridSearchSource[];
+  sourceCount: number;
+  sourceDates: Partial<Record<HybridSearchSource, string | null>>;
+  attachments: Partial<Record<HybridSearchSource, ArchiveSourceAttachment>>;
+  isBookmarked: boolean;
+  isLiked: boolean;
+  isInFeed: boolean;
+}
 
 export interface StatusBucket {
   total: number;
@@ -12,6 +45,7 @@ export interface StatusBucket {
 
 export interface StatusResponse {
   dataDir: string;
+  archive: StatusBucket;
   bookmarks: StatusBucket;
   likes: StatusBucket;
   feed: StatusBucket;
@@ -74,6 +108,7 @@ export interface HybridSearchResult {
   postedAt?: string | null;
   source: HybridSearchSource;
   sources: HybridSearchSource[];
+  sourceCount: number;
   score: number;
   topicScore: number;
   actionScore: number;
@@ -85,11 +120,20 @@ export interface HybridSearchResult {
 }
 
 export interface ListResponse<T> {
-  source: ArchiveSource;
+  source: LegacyArchiveSource;
   total: number;
   limit: number;
   offset: number;
   items: T[];
+}
+
+export interface ArchiveListResponse {
+  resource: 'archive';
+  source: ArchiveFilter;
+  total: number;
+  limit: number;
+  offset: number;
+  items: ArchiveItem[];
 }
 
 export interface HybridSearchResponse {
