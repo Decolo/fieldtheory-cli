@@ -12,6 +12,7 @@ export interface HybridSearchResult {
   postedAt?: string | null;
   source: HybridSearchSource;
   sources: HybridSearchSource[];
+  sourceCount: number;
   score: number;
   topicScore: number;
   actionScore: number;

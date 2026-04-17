@@ -159,9 +159,30 @@ test('web api status returns bookmark and like summaries', { concurrency: false 
     assert.equal(response.status, 200);
 
     const data = await response.json() as any;
+    assert.equal(data.archive.total, 5);
     assert.equal(data.bookmarks.total, 2);
     assert.equal(data.likes.total, 2);
     assert.equal(data.feed.total, 1);
+  });
+});
+
+test('web api exposes first-class archive list and detail endpoints', { concurrency: false }, async () => {
+  await withArchiveData(async () => {
+    const app = await createWebApp();
+
+    const listResponse = await app.request('/api/archive?source=likes&query=Claude&limit=10');
+    assert.equal(listResponse.status, 200);
+    const listData = await listResponse.json() as any;
+    assert.equal(listData.resource, 'archive');
+    assert.equal(listData.source, 'likes');
+    assert.equal(listData.total, 1);
+    assert.equal(listData.items[0].isLiked, true);
+    assert.equal(listData.items[0].sourceCount >= 1, true);
+
+    const detailResponse = await app.request(`/api/archive/${listData.items[0].id}`);
+    assert.equal(detailResponse.status, 200);
+    const detailData = await detailResponse.json() as any;
+    assert.equal(detailData.attachments.likes.sourceRecordId, 'lk-1');
   });
 });
 
@@ -209,6 +230,12 @@ test('web api returns empty lists when indexes are missing', { concurrency: fals
     const data = await response.json() as any;
     assert.equal(data.total, 0);
     assert.deepEqual(data.items, []);
+
+    const archiveResponse = await app.request('/api/archive?source=all');
+    assert.equal(archiveResponse.status, 200);
+    const archiveData = await archiveResponse.json() as any;
+    assert.equal(archiveData.total, 0);
+    assert.deepEqual(archiveData.items, []);
   } finally {
     delete process.env.FT_DATA_DIR;
     await rm(dir, { recursive: true, force: true });
@@ -231,6 +258,86 @@ test('web api returns hybrid search results and summaries', { concurrency: false
     assert.equal(typeof summaryData.summary, 'string');
     assert.equal(summaryData.summary.length > 0, true);
   });
+});
+
+test('web api archive filter preserves filtered primary source for multi-source items', { concurrency: false }, async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-web-api-filtered-source-'));
+  process.env.FT_DATA_DIR = dir;
+  const previousDisable = process.env.FT_DISABLE_LLM_ASSIST;
+  process.env.FT_DISABLE_LLM_ASSIST = '1';
+
+  try {
+    await writeJsonLines(path.join(dir, 'bookmarks.jsonl'), [
+      {
+        id: 'bm-shared',
+        tweetId: 'shared-201',
+        url: 'https://x.com/alice/status/shared-201',
+        text: 'Claude Code archive item shared across bookmarks and likes.',
+        authorHandle: 'alice',
+        authorName: 'Alice',
+        syncedAt: daysAgo(2, 8),
+        postedAt: daysAgo(3, 8),
+        bookmarkedAt: daysAgo(2, 8),
+        links: [],
+        tags: [],
+        media: [],
+        ingestedVia: 'browser',
+      },
+    ]);
+    await writeJsonLines(path.join(dir, 'likes.jsonl'), [
+      {
+        id: 'lk-shared',
+        tweetId: 'shared-201',
+        url: 'https://x.com/alice/status/shared-201',
+        text: 'Claude Code archive item shared across bookmarks and likes.',
+        authorHandle: 'alice',
+        authorName: 'Alice',
+        syncedAt: daysAgo(1, 9),
+        postedAt: daysAgo(3, 8),
+        likedAt: daysAgo(1, 9),
+        links: [],
+        tags: [],
+        media: [],
+        ingestedVia: 'browser',
+      },
+    ]);
+    await writeJson(path.join(dir, 'bookmarks-meta.json'), {
+      provider: 'twitter',
+      schemaVersion: 1,
+      totalBookmarks: 1,
+    });
+    await writeJson(path.join(dir, 'likes-meta.json'), {
+      provider: 'twitter',
+      schemaVersion: 1,
+      totalLikes: 1,
+    });
+    await writeJsonLines(path.join(dir, 'feed.jsonl'), []);
+    await writeJson(path.join(dir, 'feed-meta.json'), {
+      provider: 'twitter',
+      schemaVersion: 1,
+      totalItems: 0,
+      totalSkippedEntries: 0,
+    });
+    await buildIndex();
+    await buildLikesIndex();
+    await buildFeedIndex();
+
+    const app = await createWebApp();
+    const response = await app.request('/api/archive?source=likes&query=Claude&limit=10');
+    assert.equal(response.status, 200);
+
+    const data = await response.json() as any;
+    assert.equal(data.total, 1);
+    assert.equal(data.items[0].tweetId, 'shared-201');
+    assert.equal(data.items[0].source, 'likes');
+    assert.equal(data.items[0].isLiked, true);
+    assert.equal(data.items[0].isBookmarked, true);
+  } finally {
+    delete process.env.FT_DATA_DIR;
+    if (previousDisable == null) delete process.env.FT_DISABLE_LLM_ASSIST;
+    else process.env.FT_DISABLE_LLM_ASSIST = previousDisable;
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('web api rejects invalid hybrid search mode', { concurrency: false }, async () => {

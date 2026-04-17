@@ -3,6 +3,13 @@ import { openDb, saveDb } from './db.js';
 import { readJsonLines } from './fs.js';
 import { twitterLikesCachePath, twitterLikesIndexPath } from './paths.js';
 import type { LikeRecord } from './types.js';
+import {
+  countLikeProjections,
+  getLikeProjectionById,
+  listLikeProjections,
+  searchLikeProjections,
+} from './archive-projections.js';
+import { rebuildArchiveStoreFromCaches } from './archive-store.js';
 
 export interface LikeSearchResult {
   id: string;
@@ -125,6 +132,11 @@ function likeSortClause(direction: 'asc' | 'desc' = 'desc'): string {
   `;
 }
 
+function isMissingLikesIndexError(error: unknown): boolean {
+  const message = (error as Error).message ?? '';
+  return message.includes('no such table') || message.includes('no such column');
+}
+
 function initSchema(db: Database): void {
   db.run(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`);
   db.run(`CREATE TABLE IF NOT EXISTS likes (
@@ -237,6 +249,7 @@ export async function buildLikesIndex(options?: { force?: boolean }): Promise<{ 
     db.run(`INSERT INTO likes_fts(likes_fts) VALUES('rebuild')`);
     saveDb(db, dbPath);
     const totalRows = db.exec('SELECT COUNT(*) FROM likes')[0]?.values[0]?.[0] as number;
+    await rebuildArchiveStoreFromCaches({ buildIndex: true, forceIndex: options?.force ?? false });
     return { dbPath, recordCount: totalRows, newRecords: newRecords.length };
   } finally {
     db.close();
@@ -244,12 +257,13 @@ export async function buildLikesIndex(options?: { force?: boolean }): Promise<{ 
 }
 
 export async function searchLikes(options: LikeSearchOptions): Promise<LikeSearchResult[]> {
-  const db = await openDb(twitterLikesIndexPath());
-  const limit = options.limit ?? 20;
+  const dbPath = twitterLikesIndexPath();
+  const db = await openDb(dbPath);
 
   try {
     const conditions: string[] = [];
     const params: Array<string | number> = [];
+    const limit = options.limit ?? 20;
 
     if (options.query) {
       conditions.push(`l.rowid IN (SELECT rowid FROM likes_fts WHERE likes_fts MATCH ?)`);
@@ -268,42 +282,64 @@ export async function searchLikes(options: LikeSearchOptions): Promise<LikeSearc
       params.push(options.before);
     }
 
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const orderBy = options.query
-      ? `ORDER BY bm25(likes_fts, 5.0, 1.0, 1.0) ASC`
-      : `ORDER BY COALESCE(l.liked_at, l.posted_at) DESC`;
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const sql = options.query
-      ? `
-        SELECT l.id, l.url, l.text, l.author_handle, l.author_name, l.liked_at, l.posted_at,
-               bm25(likes_fts, 5.0, 1.0, 1.0) as score
-        FROM likes l
-        JOIN likes_fts ON likes_fts.rowid = l.rowid
-        ${where}
-        ${orderBy}
-        LIMIT ?
-      `
-      : `
-        SELECT l.id, l.url, l.text, l.author_handle, l.author_name, l.liked_at, l.posted_at, 0 as score
-        FROM likes l
-        ${where}
-        ${orderBy}
-        LIMIT ?
-      `;
+    let rows;
+    try {
+      rows = db.exec(
+        `
+          SELECT
+            l.id,
+            l.url,
+            l.text,
+            l.author_handle,
+            l.author_name,
+            l.liked_at,
+            l.posted_at,
+            ${options.query ? 'bm25(likes_fts, 5.0, 1.0, 1.0)' : '0'} as score
+          FROM likes l
+          ${options.query ? 'JOIN likes_fts ON likes_fts.rowid = l.rowid' : ''}
+          ${where}
+          ${options.query
+            ? 'ORDER BY bm25(likes_fts, 5.0, 1.0, 1.0) ASC'
+            : likeSortClause('desc')}
+          LIMIT ?
+        `,
+        [...params, limit],
+      );
+    } catch (error) {
+      const message = (error as Error).message ?? '';
+      if (message.includes('fts5') || message.includes('MATCH') || message.includes('syntax')) {
+        throw new Error(`Invalid search query: "${options.query}". Try simpler terms or wrap phrases in double quotes.`);
+      }
+      if (isMissingLikesIndexError(error)) {
+        throw error;
+      }
+      throw error;
+    }
 
-    params.push(limit);
-    const rows = db.exec(sql, params);
-    if (!rows.length) return [];
-
-    return rows[0].values.map((row) => ({
-      id: row[0] as string,
-      url: row[1] as string,
-      text: row[2] as string,
-      authorHandle: row[3] as string | undefined,
-      authorName: row[4] as string | undefined,
-      likedAt: row[5] as string | null,
-      postedAt: row[6] as string | null,
-      score: row[7] as number,
+    return (rows[0]?.values ?? []).map((row) => ({
+      id: String(row[0]),
+      url: String(row[1]),
+      text: String(row[2] ?? ''),
+      authorHandle: (row[3] as string) ?? undefined,
+      authorName: (row[4] as string) ?? undefined,
+      likedAt: (row[5] as string) ?? null,
+      postedAt: (row[6] as string) ?? null,
+      score: Number(row[7] ?? 0),
+    }));
+  } catch (error) {
+    if (!isMissingLikesIndexError(error)) throw error;
+    const rows = await searchLikeProjections(options);
+    return rows.map((row) => ({
+      id: row.id,
+      url: row.url,
+      text: row.text,
+      authorHandle: row.authorHandle,
+      authorName: row.authorName,
+      likedAt: row.sourceTimestamp ?? null,
+      postedAt: row.postedAt ?? null,
+      score: row.score,
     }));
   } finally {
     db.close();
@@ -311,96 +347,105 @@ export async function searchLikes(options: LikeSearchOptions): Promise<LikeSearc
 }
 
 export async function listLikes(filters: LikeTimelineFilters = {}): Promise<LikeTimelineItem[]> {
-  const db = await openDb(twitterLikesIndexPath());
-  const limit = filters.limit ?? 30;
-  const offset = filters.offset ?? 0;
+  const dbPath = twitterLikesIndexPath();
+  const db = await openDb(dbPath);
 
   try {
     const { where, params } = buildLikeWhereClause(filters);
-    const sql = `
-      SELECT
-        l.id,
-        l.tweet_id,
-        l.url,
-        l.text,
-        l.author_handle,
-        l.author_name,
-        l.author_profile_image_url,
-        l.posted_at,
-        l.liked_at,
-        l.links_json,
-        l.media_count,
-        l.link_count,
-        l.like_count,
-        l.repost_count,
-        l.reply_count,
-        l.quote_count,
-        l.bookmark_count,
-        l.view_count
-      FROM likes l
-      ${where}
-      ${likeSortClause(filters.sort)}
-      LIMIT ?
-      OFFSET ?
-    `;
-    params.push(limit, offset);
-    const rows = db.exec(sql, params);
-    if (!rows.length) return [];
-    return rows[0].values.map((row) => mapTimelineRow(row));
+    const rows = db.exec(
+      `
+        SELECT
+          l.id,
+          l.tweet_id,
+          l.url,
+          l.text,
+          l.author_handle,
+          l.author_name,
+          l.author_profile_image_url,
+          l.posted_at,
+          l.liked_at,
+          l.links_json,
+          l.media_count,
+          l.link_count,
+          l.like_count,
+          l.repost_count,
+          l.reply_count,
+          l.quote_count,
+          l.bookmark_count,
+          l.view_count
+        FROM likes l
+        ${where}
+        ${likeSortClause(filters.sort)}
+        LIMIT ?
+        OFFSET ?
+      `,
+      [...params, filters.limit ?? 30, filters.offset ?? 0],
+    );
+    return (rows[0]?.values ?? []).map((row) => mapTimelineRow(row));
+  } catch (error) {
+    if (!isMissingLikesIndexError(error)) throw error;
+    return listLikeProjections(filters);
   } finally {
     db.close();
   }
 }
 
 export async function countLikes(filters: LikeTimelineFilters = {}): Promise<number> {
-  const db = await openDb(twitterLikesIndexPath());
+  const dbPath = twitterLikesIndexPath();
+  const db = await openDb(dbPath);
 
   try {
     const { where, params } = buildLikeWhereClause(filters);
     const rows = db.exec(
-      `
-        SELECT COUNT(*)
-        FROM likes l
-        ${where}
-      `,
+      `SELECT COUNT(*) FROM likes l ${where}`,
       params,
     );
     return Number(rows[0]?.values?.[0]?.[0] ?? 0);
+  } catch (error) {
+    if (!isMissingLikesIndexError(error)) throw error;
+    return countLikeProjections(filters);
   } finally {
     db.close();
   }
 }
 
 export async function getLikeById(id: string): Promise<LikeTimelineItem | null> {
-  const db = await openDb(twitterLikesIndexPath());
+  const dbPath = twitterLikesIndexPath();
+  const db = await openDb(dbPath);
+
   try {
     const rows = db.exec(
-      `SELECT
-        l.id,
-        l.tweet_id,
-        l.url,
-        l.text,
-        l.author_handle,
-        l.author_name,
-        l.author_profile_image_url,
-        l.posted_at,
-        l.liked_at,
-        l.links_json,
-        l.media_count,
-        l.link_count,
-        l.like_count,
-        l.repost_count,
-        l.reply_count,
-        l.quote_count,
-        l.bookmark_count,
-        l.view_count
-      FROM likes l
-      WHERE l.id = ?
-      LIMIT 1`,
-      [id],
+      `
+        SELECT
+          l.id,
+          l.tweet_id,
+          l.url,
+          l.text,
+          l.author_handle,
+          l.author_name,
+          l.author_profile_image_url,
+          l.posted_at,
+          l.liked_at,
+          l.links_json,
+          l.media_count,
+          l.link_count,
+          l.like_count,
+          l.repost_count,
+          l.reply_count,
+          l.quote_count,
+          l.bookmark_count,
+          l.view_count
+        FROM likes l
+        WHERE l.id = ? OR l.tweet_id = ?
+        LIMIT 1
+      `,
+      [id, id],
     );
     const row = rows[0]?.values?.[0];
     return row ? mapTimelineRow(row) : null;
+  } catch (error) {
+    if (!isMissingLikesIndexError(error)) throw error;
+    return getLikeProjectionById(id);
   } finally {
     db.close();
   }

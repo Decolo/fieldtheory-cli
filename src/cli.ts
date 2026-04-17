@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { getLikesStatusView, formatLikesStatus } from './likes-service.js';
 import { getFeedStatusView, formatFeedStatus } from './feed-service.js';
@@ -8,12 +7,12 @@ import { formatFeedAgentLog, formatFeedAgentStatus, getFeedAgentStatusView, list
 import { formatFeedDaemonStatus, getFeedDaemonState, startFeedDaemon, stopFeedDaemon } from './feed-daemon.js';
 import { addFeedPreference, formatFeedPreferences, loadFeedPreferences, removeFeedPreference } from './feed-preferences.js';
 import { formatSemanticStatus, getSemanticStatusView, rebuildSemanticIndex } from './semantic-indexer.js';
-import { runTwitterOAuthFlow } from './xauth.js';
-import { syncBookmarksGraphQL, syncGaps } from './graphql-bookmarks.js';
 import { syncLikesGraphQL, type LikesSyncProgress } from './graphql-likes.js';
 import { syncFeedGraphQL, type FeedSyncProgress } from './graphql-feed.js';
 import { bookmarkTweet, unlikeTweet, unbookmarkTweet } from './graphql-actions.js';
-import type { SyncProgress, GapFillProgress } from './graphql-bookmarks.js';
+import { fetchBookmarkRecordViaSyndication, type SyncProgress, type GapFillProgress } from './graphql-bookmarks.js';
+import { syncBookmarks } from './bookmark-sync.js';
+import { repairBookmarks } from './bookmark-repair.js';
 import { fetchBookmarkMediaBatch } from './bookmark-media.js';
 import {
   buildIndex,
@@ -46,7 +45,7 @@ import { askMd } from './md-ask.js';
 import { lintMd, fixLintIssues } from './md-lint.js';
 import { exportBookmarks } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
-import { removeBookmarkFromArchive, removeLikeFromArchive } from './archive-actions.js';
+import { removeBookmarkFromArchive, removeLikeFromArchive, upsertBookmarkInArchive } from './archive-actions.js';
 import { listBrowserIds } from './browsers.js';
 import {
   dataDir,
@@ -55,7 +54,6 @@ import {
   isFeedFirstRun,
   isLikesFirstRun,
   twitterBookmarksIndexPath,
-  twitterBackfillStatePath,
   twitterFeedIndexPath,
   twitterLikesIndexPath,
   mdDir,
@@ -128,9 +126,24 @@ const FRIENDLY_STOP_REASONS: Record<string, string> = {
   'target additions reached': 'Reached target bookmark count.',
 };
 
+const BOOKMARK_REPAIR_FAILURE_LOG = 'bookmark-repair-failures.json';
+
 function friendlyStopReason(raw?: string): string {
   if (!raw) return 'Sync complete.';
   return FRIENDLY_STOP_REASONS[raw] ?? `Sync complete \u2014 ${raw}`;
+}
+
+function writeBookmarkRepairFailureLog(
+  failures: Array<{ tweetId: string; reason: string; url: string }>,
+): string {
+  const logPath = path.join(dataDir(), BOOKMARK_REPAIR_FAILURE_LOG);
+  const byReason: Record<string, number> = {};
+  for (const failure of failures) {
+    const reason = String(failure.reason);
+    byReason[reason] = (byReason[reason] ?? 0) + 1;
+  }
+  fs.writeFileSync(logPath, JSON.stringify({ failures, summary: byReason }, null, 2));
+  return logPath;
 }
 
 function formatHybridSearchResults(results: HybridSearchResult[], mode: HybridSearchMode): string {
@@ -153,7 +166,7 @@ function warnIfEmpty(totalBookmarks: number): void {
   console.log(`    \u2022 The browser needs to be fully quit first (Cmd+Q / close all windows)`);
   console.log(`    \u2022 Keychain/keyring access was denied`);
   console.log(`    \u2022 You may be logged into a different profile than the one with X/Twitter`);
-  console.log(`    \u2022 Try: ft sync --cookies <ct0> <auth_token>  (paste from DevTools)\n`);
+  console.log(`    \u2022 Try: ft bookmarks sync --cookies <ct0> <auth_token>  (paste from DevTools)\n`);
 }
 
 // ── Update checker ────────────────────────────────────────────────────────
@@ -237,10 +250,10 @@ function showCachedUpdateNotice(): void {
 
 const WHATS_NEW: Record<string, string[]> = {
   '1.2.2': [
-    'ft sync --gaps \u2014 backfill missing quoted tweets and expand truncated articles',
+    'ft bookmarks repair \u2014 backfill missing quoted tweets and expand truncated articles',
     'Quoted tweet content and full article text now captured automatically during sync',
     'Bookmark date (when you bookmarked, not just when it was posted) now tracked',
-    'ft sync --rebuild replaces --full',
+    'ft bookmarks sync --rebuild replaces --full',
     'Update notifications when a new version is available',
   ],
 };
@@ -299,7 +312,7 @@ export function showWelcome(): void {
   Get started:
 
     1. Open your browser and log into x.com
-    2. Run: ft sync
+    2. Run: ft bookmarks sync
 
   Works with Chrome, Brave, Chromium, and Firefox on macOS/Linux.
   Data will be stored at: ${dataDir()}
@@ -325,9 +338,9 @@ export async function showDashboard(): Promise<void> {
     }
 
   console.log(`
-  \x1b[2mSync now:\x1b[0m     ft sync
-  \x1b[2mSearch:\x1b[0m       ft search "query"
-  \x1b[2mExplore:\x1b[0m      ft viz
+  \x1b[2mSync now:\x1b[0m     ft bookmarks sync
+  \x1b[2mSearch:\x1b[0m       ft bookmarks search "query"
+  \x1b[2mExplore:\x1b[0m      ft bookmarks viz
   \x1b[2mWeb UI:\x1b[0m       ft web
   \x1b[2mAll commands:\x1b[0m  ft --help
 `);
@@ -335,7 +348,7 @@ export async function showDashboard(): Promise<void> {
     console.log(`
   Data: ${dataDir()}
 
-  Run: ft sync
+  Run: ft bookmarks sync
 `);
   }
 }
@@ -375,7 +388,7 @@ function requireData(): boolean {
   Get started:
 
     1. Open your browser and log into x.com
-    2. Run: ft sync
+    2. Run: ft bookmarks sync
 `);
     process.exitCode = 1;
     return false;
@@ -390,7 +403,7 @@ function requireIndex(): boolean {
     console.log(`
   Search index not built yet.
 
-  Run: ft index
+  Run: ft bookmarks index
 `);
     process.exitCode = 1;
     return false;
@@ -517,6 +530,52 @@ export function buildCli() {
   loadEnv();
   const program = new Command();
 
+  async function runBookmarkRepairCommand(
+    options: { delayMs?: number },
+  ): Promise<void> {
+    const startTime = Date.now();
+    process.stderr.write('  Repairing bookmark enrichment gaps (quoted tweets, truncated text, invalid dates)...\n');
+    let lastProgress: GapFillProgress = { done: 0, total: 0, quotedFetched: 0, textExpanded: 0, failed: 0 };
+    const spinner = createSpinner(() => {
+      const p = lastProgress;
+      const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0;
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      return `${p.done}/${p.total} (${pct}%) \u2502 ${p.quotedFetched} quoted \u2502 ${p.textExpanded} expanded \u2502 ${p.failed} failed \u2502 ${elapsed}s`;
+    });
+    const result = await runWithSpinner(spinner, () => repairBookmarks({
+      delayMs: Number(options.delayMs) || 300,
+      onProgress: (progress: GapFillProgress) => {
+        lastProgress = progress;
+        spinner.update();
+      },
+    }));
+
+    if (result.total === 0 && result.bookmarkedAtRepaired === 0) {
+      console.log('  No repair needed \u2014 bookmarks are already fully enriched.');
+      return;
+    }
+
+    if (result.quotedTweetsFilled > 0) console.log(`  \u2713 ${result.quotedTweetsFilled} quoted tweets repaired`);
+    if (result.textExpanded > 0) console.log(`  \u2713 ${result.textExpanded} truncated texts expanded`);
+    if (result.bookmarkedAtRepaired > 0) {
+      console.log(`  \u2713 ${result.bookmarkedAtRepaired} invalid bookmark dates cleared`);
+      await rebuildIndex();
+    }
+    if (result.failed > 0) {
+      const logPath = writeBookmarkRepairFailureLog(result.failures);
+      const summary = JSON.parse(fs.readFileSync(logPath, 'utf-8')) as { summary: Record<string, number> };
+
+      console.log(`  ${result.failed} unavailable:`);
+      for (const [reason, count] of Object.entries(summary.summary)) {
+        console.log(`    \u2022 ${count} ${reason}`);
+      }
+      console.log(`  Details: ${logPath}`);
+    }
+    if (result.bookmarkedAtMissing > 0) {
+      console.log(`  ${result.bookmarkedAtMissing} bookmarks still missing a reliable bookmark date`);
+    }
+  }
+
   async function rebuildIndex(): Promise<number> {
     process.stderr.write('  Building search index...\n');
     const idx = await buildIndex();
@@ -567,15 +626,16 @@ export function buildCli() {
       showWhatsNew();
     });
 
-  // ── sync ────────────────────────────────────────────────────────────────
+  // ── bookmarks ───────────────────────────────────────────────────────────
 
-  program
+  const bookmarks = program
+    .command('bookmarks')
+    .description('Sync, query, and manage your bookmarks archive');
+
+  bookmarks
     .command('sync')
-    .description('Sync bookmarks from X into your local database')
-    .option('--api', 'Use OAuth v2 API instead of Chrome session', false)
+    .description('Sync bookmarks from X into your local archive')
     .option('--rebuild', 'Full re-crawl of all bookmarks', false)
-    .option('--continue', 'Resume a previous sync that was interrupted or hit the page limit', false)
-    .option('--gaps', 'Backfill missing data (quoted tweets, truncated articles)', false)
     .option('--yes', 'Skip confirmation prompts', false)
     .option('--classify', 'Classify new bookmarks with LLM after syncing', false)
     .option('--max-pages <n>', 'Max pages to fetch (default: unlimited)', (v: string) => Number(v))
@@ -593,62 +653,6 @@ export function buildCli() {
       ensureDataDir();
 
       try {
-        const mutuallyExclusive = [options.rebuild, options.continue, options.gaps].filter(Boolean).length;
-        if (mutuallyExclusive > 1) {
-          console.error('  Error: --rebuild, --continue, and --gaps cannot be used together.');
-          process.exitCode = 1;
-          return;
-        }
-
-        // ── gaps mode: backfill missing data for existing bookmarks ──
-        if (options.gaps) {
-          const startTime = Date.now();
-          process.stderr.write('  Filling gaps (quoted tweets, truncated text)...\n');
-          let lastProgress: GapFillProgress = { done: 0, total: 0, quotedFetched: 0, textExpanded: 0, failed: 0 };
-          const spinner = createSpinner(() => {
-            const p = lastProgress;
-            const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0;
-            const elapsed = Math.round((Date.now() - startTime) / 1000);
-            return `${p.done}/${p.total} (${pct}%) \u2502 ${p.quotedFetched} quoted \u2502 ${p.textExpanded} expanded \u2502 ${p.failed} failed \u2502 ${elapsed}s`;
-          });
-          const result = await runWithSpinner(spinner, () => syncGaps({
-            delayMs: Number(options.delayMs) || 300,
-            onProgress: (progress: GapFillProgress) => {
-              lastProgress = progress;
-              spinner.update();
-            },
-          }));
-          if (result.total === 0 && result.bookmarkedAtRepaired === 0) {
-            console.log('  No gaps found \u2014 all bookmarks are fully enriched.');
-          } else {
-            if (result.quotedTweetsFilled > 0) console.log(`  \u2713 ${result.quotedTweetsFilled} quoted tweets filled`);
-            if (result.textExpanded > 0) console.log(`  \u2713 ${result.textExpanded} truncated texts expanded`);
-            if (result.bookmarkedAtRepaired > 0) {
-              console.log(`  \u2713 ${result.bookmarkedAtRepaired} invalid bookmark dates cleared`);
-              await rebuildIndex();
-            }
-            if (result.failed > 0) {
-              // Write failure log
-              const logPath = path.join(dataDir(), 'gaps-failures.json');
-              const byReason: Record<string, number> = {};
-              for (const f of result.failures) {
-                byReason[f.reason] = (byReason[f.reason] ?? 0) + 1;
-              }
-              fs.writeFileSync(logPath, JSON.stringify({ failures: result.failures, summary: byReason }, null, 2));
-
-              console.log(`  ${result.failed} unavailable:`);
-              for (const [reason, count] of Object.entries(byReason)) {
-                console.log(`    \u2022 ${count} ${reason}`);
-              }
-              console.log(`  Details: ${logPath}`);
-            }
-            if (result.bookmarkedAtMissing > 0) {
-              console.log(`  ${result.bookmarkedAtMissing} bookmarks missing a reliable bookmark date`);
-            }
-          }
-          return;
-        }
-
         // ── rebuild confirmation ──
         if (options.rebuild) {
           const dir = dataDir();
@@ -674,109 +678,69 @@ export function buildCli() {
           }
         }
 
-        const useApi = Boolean(options.api);
-        const mode = Boolean(options.rebuild) ? 'full' : 'incremental';
-
-        if (useApi) {
-          const result = await syncTwitterBookmarks(mode, {
-            targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
-          });
-          console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
-          console.log(`  \u2713 Data: ${dataDir()}\n`);
-          warnIfEmpty(result.totalBookmarks);
-          const newCount = await rebuildIndex();
-          if (options.classify && newCount > 0) {
-            await classifyNew();
+        const startTime = Date.now();
+        let lastSync: SyncProgress = { page: 0, totalFetched: 0, newAdded: 0, running: true, done: false };
+        const spinner = createSpinner(() => {
+          const elapsed = Math.round((Date.now() - startTime) / 1000);
+          if (lastSync.stopReason && lastSync.running) {
+            return `${lastSync.stopReason}  \u2502  ${lastSync.newAdded} new  \u2502  ${elapsed}s`;
           }
-        } else {
-          const startTime = Date.now();
-          let lastSync: SyncProgress = { page: 0, totalFetched: 0, newAdded: 0, running: true, done: false };
-          const spinner = createSpinner(() => {
-            const elapsed = Math.round((Date.now() - startTime) / 1000);
-            if (lastSync.stopReason && lastSync.running) {
-              return `${lastSync.stopReason}  \u2502  ${lastSync.newAdded} new  \u2502  ${elapsed}s`;
-            }
-            return `Syncing bookmarks...  ${lastSync.newAdded} new  \u2502  page ${lastSync.page}  \u2502  ${elapsed}s`;
-          });
-          // Parse --cookies <ct0> [auth_token] — variadic, gives us an array
-          let csrfToken: string | undefined;
-          let cookieHeader: string | undefined;
-          if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
-            csrfToken = String(options.cookies[0]);
-            const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
-            const parts = [`ct0=${csrfToken}`];
-            if (authToken) parts.push(`auth_token=${authToken}`);
-            cookieHeader = parts.join('; ');
-          }
+          return `Syncing bookmarks...  ${lastSync.newAdded} new  \u2502  page ${lastSync.page}  \u2502  ${elapsed}s`;
+        });
+        let csrfToken: string | undefined;
+        let cookieHeader: string | undefined;
+        if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
+          csrfToken = String(options.cookies[0]);
+          const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+          const parts = [`ct0=${csrfToken}`];
+          if (authToken) parts.push(`auth_token=${authToken}`);
+          cookieHeader = parts.join('; ');
+        }
 
-          // Load saved cursor for --continue mode
-          let resumeCursor: string | undefined;
-          if (options.continue) {
-            try {
-              const statePath = twitterBackfillStatePath();
-              const state = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
-              resumeCursor = state?.lastCursor;
-            } catch { /* no state file yet */ }
-            if (resumeCursor) {
-              console.log('  Resuming from saved position...\n');
-            } else {
-              console.log('  No saved cursor — scanning past existing bookmarks to find new ones...\n');
-            }
-          }
+        const result = await runWithSpinner(spinner, () => syncBookmarks({
+          rebuild: Boolean(options.rebuild),
+          maxPages: options.maxPages != null ? Number(options.maxPages) : undefined,
+          targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
+          delayMs: Number(options.delayMs) || 600,
+          maxMinutes: Number(options.maxMinutes) || 30,
+          browser: options.browser ? String(options.browser) : undefined,
+          csrfToken,
+          cookieHeader,
+          chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+          chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+          firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+          onProgress: (status: SyncProgress) => {
+            lastSync = status;
+            spinner.update();
+          },
+        }));
 
-          // When continuing without a cursor, disable stale page limit so we can
-          // page through all existing bookmarks to reach the ones beyond the old cap.
-          // With a saved cursor we skip straight to where we left off, so the normal
-          // stale limit is fine.
-          const continueWithoutCursor = Boolean(options.continue) && !resumeCursor;
+        console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
+        console.log(`  ${friendlyStopReason(result.stopReason)}`);
+        if (result.bookmarkedAtRepaired > 0) {
+          console.log(`  \u2713 ${result.bookmarkedAtRepaired} invalid bookmark dates cleared`);
+        }
+        if (result.bookmarkedAtMissing > 0) {
+          console.log(`  ${result.bookmarkedAtMissing} bookmarks missing a reliable bookmark date`);
+        }
+        console.log(`  \u2713 Data: ${dataDir()}\n`);
 
-          const result = await runWithSpinner(spinner, () => syncBookmarksGraphQL({
-            incremental: !Boolean(options.rebuild) && !Boolean(options.continue),
-            resumeCursor,
-            stalePageLimit: continueWithoutCursor ? Infinity : undefined,
-            maxPages: options.maxPages != null ? Number(options.maxPages) : undefined,
-            targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
-            delayMs: Number(options.delayMs) || 600,
-            maxMinutes: Number(options.maxMinutes) || 30,
-            browser: options.browser ? String(options.browser) : undefined,
-            csrfToken,
-            cookieHeader,
-            chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
-            chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
-            firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
-            onProgress: (status: SyncProgress) => {
-              lastSync = status;
-              spinner.update();
-            },
-          }));
+        warnIfEmpty(result.totalBookmarks);
 
-          console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
-          console.log(`  ${friendlyStopReason(result.stopReason)}`);
-          if (result.bookmarkedAtRepaired > 0) {
-            console.log(`  \u2713 ${result.bookmarkedAtRepaired} invalid bookmark dates cleared`);
-          }
-          if (result.bookmarkedAtMissing > 0) {
-            console.log(`  ${result.bookmarkedAtMissing} bookmarks missing a reliable bookmark date`);
-          }
-          console.log(`  \u2713 Data: ${dataDir()}\n`);
-
-          warnIfEmpty(result.totalBookmarks);
-
-          const newCount = await rebuildIndex();
-          if (options.classify && newCount > 0) {
-            await classifyNew();
-          }
+        const newCount = await rebuildIndex();
+        if (options.classify && newCount > 0) {
+          await classifyNew();
         }
 
         if (firstRun) {
           console.log(`\n  Next steps:`);
-          console.log(`        ft classify              Classify by category and domain (LLM)`);
-          console.log(`        ft classify --regex      Classify by category (simple)`);
+          console.log(`        ft bookmarks classify              Classify by category and domain (LLM)`);
+          console.log(`        ft bookmarks classify --regex      Classify by category (simple)`);
           console.log(`\n  Explore:`);
-          console.log(`        ft search "machine learning"`);
-          console.log(`        ft viz`);
+          console.log(`        ft bookmarks search "machine learning"`);
+          console.log(`        ft bookmarks viz`);
           console.log(`        ft web`);
-          console.log(`        ft categories`);
+          console.log(`        ft bookmarks categories`);
           console.log(`\n  You can also just tell Claude to use the ft CLI to search and`);
           console.log(`  explore your bookmarks. It already knows how.\n`);
         }
@@ -790,13 +754,13 @@ export function buildCli() {
   To sync your bookmarks:
 
     1. Open your browser and log into x.com
-    2. Run: ft sync
+    2. Run: ft bookmarks sync
 
   Options:
-    ft sync --browser brave           Use a specific browser
-    ft sync --browser firefox          Use Firefox
-    ft sync --cookies <ct0> <auth>     Pass cookies directly
-    ft sync --chrome-profile-directory "Profile 1"
+    ft bookmarks sync --browser brave           Use a specific browser
+    ft bookmarks sync --browser firefox         Use Firefox
+    ft bookmarks sync --cookies <ct0> <auth>    Pass cookies directly
+    ft bookmarks sync --chrome-profile-directory "Profile 1"
 `);
         } else {
           console.error(`\n  Error: ${msg}\n`);
@@ -807,7 +771,7 @@ export function buildCli() {
 
   // ── search ──────────────────────────────────────────────────────────────
 
-  program
+  bookmarks
     .command('search')
     .description('Full-text search across bookmarks')
     .argument('<query>', 'Search query (supports FTS5 syntax: AND, OR, NOT, "exact phrase")')
@@ -869,7 +833,7 @@ export function buildCli() {
 
   // ── list ────────────────────────────────────────────────────────────────
 
-  program
+  bookmarks
     .command('list')
     .description('List bookmarks with filters')
     .option('--query <query>', 'Text query (FTS5 syntax)')
@@ -909,7 +873,7 @@ export function buildCli() {
 
   // ── show ─────────────────────────────────────────────────────────────────
 
-  program
+  bookmarks
     .command('show')
     .description('Show one bookmark in detail')
     .argument('<id>', 'Bookmark id')
@@ -936,7 +900,7 @@ export function buildCli() {
 
   // ── stats ───────────────────────────────────────────────────────────────
 
-  program
+  bookmarks
     .command('stats')
     .description('Aggregate statistics from your bookmarks')
     .action(safe(async () => {
@@ -953,7 +917,7 @@ export function buildCli() {
 
   // ── viz ─────────────────────────────────────────────────────────────────
 
-  program
+  bookmarks
     .command('viz')
     .description('Visual dashboard of your bookmarking patterns')
     .action(safe(async () => {
@@ -998,7 +962,7 @@ export function buildCli() {
 
   // ── classify ────────────────────────────────────────────────────────────
 
-  program
+  bookmarks
     .command('classify')
     .description('Classify bookmarks by category and domain using LLM (requires claude or codex CLI)')
     .option('--regex', 'Use simple regex classification instead of LLM')
@@ -1042,7 +1006,7 @@ export function buildCli() {
 
   // ── classify-domains ────────────────────────────────────────────────────
 
-  program
+  bookmarks
     .command('classify-domains')
     .description('Classify bookmarks by subject domain using LLM (ai, finance, etc.)')
     .option('--all', 'Re-classify all bookmarks, not just missing')
@@ -1065,7 +1029,7 @@ export function buildCli() {
 
   // ── model ───────────────────────────────────────────────────────────────
 
-  program
+  bookmarks
     .command('model')
     .description('View or change the default LLM engine for classification')
     .argument('[engine]', 'Set default engine directly (e.g. claude, codex)')
@@ -1103,7 +1067,7 @@ export function buildCli() {
 
       if (!process.stdin.isTTY) {
         if (prefs.defaultEngine) console.log(`  Current default: ${prefs.defaultEngine}`);
-        console.log('  Set with: ft model <engine>');
+        console.log('  Set with: ft bookmarks model <engine>');
         return;
       }
 
@@ -1127,14 +1091,14 @@ export function buildCli() {
 
   // ── categories ──────────────────────────────────────────────────────────
 
-  program
+  bookmarks
     .command('categories')
     .description('Show category distribution')
     .action(safe(async () => {
       if (!requireIndex()) return;
       const counts = await getCategoryCounts();
       if (Object.keys(counts).length === 0) {
-        console.log('  No categories found. Run: ft classify');
+        console.log('  No categories found. Run: ft bookmarks classify');
         return;
       }
       const total = Object.values(counts).reduce((a, b) => a + b, 0);
@@ -1146,14 +1110,14 @@ export function buildCli() {
 
   // ── domains ─────────────────────────────────────────────────────────────
 
-  program
+  bookmarks
     .command('domains')
     .description('Show domain distribution')
     .action(safe(async () => {
       if (!requireIndex()) return;
       const counts = await getDomainCounts();
       if (Object.keys(counts).length === 0) {
-        console.log('  No domains found. Run: ft classify-domains');
+        console.log('  No domains found. Run: ft bookmarks classify-domains');
         return;
       }
       const total = Object.values(counts).reduce((a, b) => a + b, 0);
@@ -1165,7 +1129,7 @@ export function buildCli() {
 
   // ── index ───────────────────────────────────────────────────────────────
 
-  program
+  bookmarks
     .command('index')
     .description('Rebuild the SQLite search index from the JSONL cache')
     .option('--force', 'Drop and rebuild from scratch (loses classifications)')
@@ -1176,21 +1140,10 @@ export function buildCli() {
       console.log(`Indexed ${result.recordCount} bookmarks (${result.newRecords} new) \u2192 ${result.dbPath}`);
     }));
 
-  // ── auth ────────────────────────────────────────────────────────────────
-
-  program
-    .command('auth')
-    .description('Set up OAuth for API-based sync (optional, needed for ft sync --api)')
-    .action(safe(async () => {
-      const result = await runTwitterOAuthFlow();
-      console.log(`Saved token to ${result.tokenPath}`);
-      if (result.scope) console.log(`Scope: ${result.scope}`);
-    }));
-
   // ── status ──────────────────────────────────────────────────────────────
 
-  program
-    .command('bookmark')
+  bookmarks
+    .command('add')
     .description('Create one bookmark on X')
     .argument('<id>', 'Post id')
     .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
@@ -1218,11 +1171,23 @@ export function buildCli() {
         firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
       });
 
+      const localRecord = await fetchBookmarkRecordViaSyndication(String(id));
+      const local = localRecord ? await upsertBookmarkInArchive(localRecord) : null;
+
       console.log(`\n  ✓ Created bookmark on X: ${result.tweetId}`);
       console.log(`  Attempts: ${result.attempts}\n`);
+      if (local) {
+        console.log(`  Local archive: ${local.inserted ? 'cached new record' : 'updated cached record'}`);
+        console.log(`  Cached bookmarks: ${local.totalRecords}`);
+        console.log(`  Cache: ${local.cachePath}`);
+        console.log(`  Index: ${local.dbPath}\n`);
+      } else {
+        console.log('  Local archive: bookmark created remotely, but local metadata fetch was unavailable.');
+        console.log('  Run `ft bookmarks sync` if you want to pull it into the local archive immediately.\n');
+      }
     }));
 
-  program
+  bookmarks
     .command('status')
     .description('Show sync status and data location')
     .action(safe(async () => {
@@ -1231,7 +1196,7 @@ export function buildCli() {
       console.log(formatBookmarkStatus(view));
     }));
 
-  program
+  bookmarks
     .command('unbookmark')
     .description('Remove one bookmark on X and reconcile the local archive')
     .argument('<id>', 'Bookmarked post id')
@@ -1270,10 +1235,18 @@ export function buildCli() {
       } catch (error) {
         throw new Error(
           `Removed bookmark on X, but failed to update the local archive.\n` +
-          `Recovery: run ft sync or ft index.\n` +
+          `Recovery: run ft bookmarks sync or ft bookmarks index.\n` +
           `Details: ${(error as Error).message}`
         );
       }
+    }));
+
+  bookmarks
+    .command('repair')
+    .description('Repair bookmark enrichment gaps in existing local data')
+    .option('--delay-ms <n>', 'Delay between repair requests in ms', (v: string) => Number(v), 300)
+    .action(safe(async (options) => {
+      await runBookmarkRepairCommand(options);
     }));
 
   // ── likes ───────────────────────────────────────────────────────────────
@@ -1963,7 +1936,7 @@ export function buildCli() {
 
   // ── sample ──────────────────────────────────────────────────────────────
 
-  program
+  bookmarks
     .command('sample')
     .description('Sample bookmarks by category')
     .argument('<category>', 'Category: tool, security, technique, launch, research, opinion, commerce')
@@ -1972,7 +1945,7 @@ export function buildCli() {
       if (!requireIndex()) return;
       const results = await sampleByCategory(category, Number(options.limit) || 10);
       if (results.length === 0) {
-        console.log(`  No bookmarks found with category "${category}". Run: ft classify`);
+        console.log(`  No bookmarks found with category "${category}". Run: ft bookmarks classify`);
         return;
       }
       for (const r of results) {
@@ -1986,7 +1959,7 @@ export function buildCli() {
 
   // ── fetch-media ─────────────────────────────────────────────────────────
 
-  program
+  bookmarks
     .command('fetch-media')
     .description('Download media assets for bookmarks (static images only)')
     .option('--limit <n>', 'Max bookmarks to process', (v: string) => Number(v), 100)
@@ -2173,22 +2146,6 @@ export function buildCli() {
         console.log(`  Removed from ${r.agent}: ${r.path}`);
       }
     }));
-
-  // ── hidden backward-compat aliases ────────────────────────────────────
-
-  const bookmarksAlias = program.command('bookmarks').description('(alias) Bookmark commands').helpOption(false);
-  for (const cmd of ['sync', 'search', 'list', 'show', 'stats', 'viz', 'classify', 'classify-domains',
-    'categories', 'domains', 'model', 'index', 'auth', 'status', 'path', 'sample', 'fetch-media', 'unbookmark']) {
-    bookmarksAlias.command(cmd).description(`Alias for: ft ${cmd}`).allowUnknownOption(true)
-      .action(async () => {
-        const args = ['node', 'ft', cmd, ...process.argv.slice(4)];
-        await program.parseAsync(args);
-      });
-  }
-  bookmarksAlias.command('enable').description('Alias for: ft sync').action(async () => {
-    const args = ['node', 'ft', 'sync', ...process.argv.slice(4)];
-    await program.parseAsync(args);
-  });
 
   program.on('afterHelp', showCachedUpdateNotice);
 

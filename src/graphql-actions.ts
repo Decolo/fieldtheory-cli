@@ -181,7 +181,14 @@ async function runMutation(
   const operationPath = new URL(buildGraphqlUrl(spec.queryId, spec.operationName)).pathname;
   if (spec === BOOKMARK_MUTATION) {
     const transactionId = await resolveXClientTransactionId(session, operationPath);
-    if (transactionId) headers['x-client-transaction-id'] = transactionId;
+    if (!transactionId) {
+      throw new RemoteTweetActionError(
+        'Failed to create bookmark before contacting X.\n' +
+        'Could not generate x-client-transaction-id from the current X web app shell. Retry in a few seconds. If this keeps failing, your X session or the web contract may have changed.',
+        { attempts: 1, retryable: true },
+      );
+    }
+    headers['x-client-transaction-id'] = transactionId;
   }
 
   const request = {

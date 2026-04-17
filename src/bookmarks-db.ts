@@ -6,6 +6,13 @@ import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js
 import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
+import {
+  countBookmarkProjections,
+  getBookmarkProjectionById,
+  listBookmarkProjections,
+  searchBookmarkProjections,
+} from './archive-projections.js';
+import { rebuildArchiveStoreFromCaches } from './archive-store.js';
 
 const SCHEMA_VERSION = 4;
 
@@ -152,11 +159,11 @@ function buildBookmarkWhereClause(filters: BookmarkTimelineFilters): {
     params.push(filters.author);
   }
   if (filters.after) {
-    conditions.push(`COALESCE(b.posted_at, b.bookmarked_at) >= ?`);
+    conditions.push(`${bookmarkDateFilterExpression('b')} >= ?`);
     params.push(filters.after);
   }
   if (filters.before) {
-    conditions.push(`COALESCE(b.posted_at, b.bookmarked_at) <= ?`);
+    conditions.push(`${bookmarkDateFilterExpression('b')} <= ?`);
     params.push(filters.before);
   }
   if (filters.category) {
@@ -174,6 +181,10 @@ function buildBookmarkWhereClause(filters: BookmarkTimelineFilters): {
   };
 }
 
+function bookmarkDateFilterExpression(alias: string): string {
+  return `COALESCE(${alias}.posted_at, ${alias}.bookmarked_at)`;
+}
+
 function bookmarkSortClause(direction: 'asc' | 'desc' = 'desc'): string {
   const normalized = direction === 'asc' ? 'ASC' : 'DESC';
   return `
@@ -185,6 +196,11 @@ function bookmarkSortClause(direction: 'asc' | 'desc' = 'desc'): string {
       END ${normalized},
       CAST(b.tweet_id AS INTEGER) ${normalized}
   `;
+}
+
+function isMissingBookmarkIndexError(error: unknown): boolean {
+  const message = (error as Error).message ?? '';
+  return message.includes('no such table') || message.includes('no such column');
 }
 
 function initSchema(db: Database): void {
@@ -376,6 +392,7 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
 
     saveDb(db, dbPath);
     const totalRows = db.exec('SELECT COUNT(*) FROM bookmarks')[0]?.values[0]?.[0] as number;
+    await rebuildArchiveStoreFromCaches({ buildIndex: true, forceIndex: options?.force ?? false });
     return { dbPath, recordCount: totalRows, newRecords: newRecords.length };
   } finally {
     db.close();
@@ -385,12 +402,12 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
 export async function searchBookmarks(options: SearchOptions): Promise<SearchResult[]> {
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
-  ensureMigrations(db);
-  const limit = options.limit ?? 20;
 
   try {
+    ensureMigrations(db);
     const conditions: string[] = [];
-    const params: any[] = [];
+    const params: Array<string | number> = [];
+    const limit = options.limit ?? 20;
 
     if (options.query) {
       conditions.push(`b.rowid IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH ?)`);
@@ -401,65 +418,69 @@ export async function searchBookmarks(options: SearchOptions): Promise<SearchRes
       params.push(options.author);
     }
     if (options.after) {
-      conditions.push(`b.posted_at >= ?`);
+      conditions.push(`${bookmarkDateFilterExpression('b')} >= ?`);
       params.push(options.after);
     }
     if (options.before) {
-      conditions.push(`b.posted_at <= ?`);
+      conditions.push(`${bookmarkDateFilterExpression('b')} <= ?`);
       params.push(options.before);
     }
 
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-
-    // If we have an FTS query, use bm25 for ranking; otherwise sort by posted_at
-    const orderBy = options.query
-      ? `ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0) ASC`
-      : `ORDER BY b.posted_at DESC`;
-
-    // For FTS ranking we need to join with the FTS table for bm25
-    let sql: string;
-    if (options.query) {
-      sql = `
-        SELECT b.id, b.url, b.text, b.author_handle, b.author_name, b.posted_at,
-               bm25(bookmarks_fts, 5.0, 1.0, 1.0) as score
-        FROM bookmarks b
-        JOIN bookmarks_fts ON bookmarks_fts.rowid = b.rowid
-        ${where}
-        ${orderBy}
-        LIMIT ?
-      `;
-    } else {
-      sql = `
-        SELECT b.id, b.url, b.text, b.author_handle, b.author_name, b.posted_at,
-               0 as score
-        FROM bookmarks b
-        ${where}
-        ORDER BY b.posted_at DESC
-        LIMIT ?
-      `;
-    }
-    params.push(limit);
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
     let rows;
     try {
-      rows = db.exec(sql, params);
-    } catch (err) {
-      const msg = (err as Error).message ?? '';
-      if (msg.includes('fts5') || msg.includes('MATCH') || msg.includes('syntax')) {
+      rows = db.exec(
+        `
+          SELECT
+            b.id,
+            b.url,
+            b.text,
+            b.author_handle,
+            b.author_name,
+            b.posted_at,
+            ${options.query ? 'bm25(bookmarks_fts, 5.0, 1.0, 1.0)' : '0'} as score
+          FROM bookmarks b
+          ${options.query ? 'JOIN bookmarks_fts ON bookmarks_fts.rowid = b.rowid' : ''}
+          ${where}
+          ${options.query
+            ? 'ORDER BY bm25(bookmarks_fts, 5.0, 1.0, 1.0) ASC'
+            : bookmarkSortClause('desc')}
+          LIMIT ?
+        `,
+        [...params, limit],
+      );
+    } catch (error) {
+      const message = (error as Error).message ?? '';
+      if (message.includes('fts5') || message.includes('MATCH') || message.includes('syntax')) {
         throw new Error(`Invalid search query: "${options.query}". Try simpler terms or wrap phrases in double quotes.`);
       }
-      throw err;
+      if (isMissingBookmarkIndexError(error)) {
+        throw error;
+      }
+      throw error;
     }
-    if (!rows.length) return [];
 
-    return rows[0].values.map((row) => ({
-      id: row[0] as string,
-      url: row[1] as string,
-      text: row[2] as string,
-      authorHandle: row[3] as string | undefined,
-      authorName: row[4] as string | undefined,
-      postedAt: row[5] as string | null,
-      score: row[6] as number,
+    return (rows[0]?.values ?? []).map((row) => ({
+      id: String(row[0]),
+      url: String(row[1]),
+      text: String(row[2] ?? ''),
+      authorHandle: (row[3] as string) ?? undefined,
+      authorName: (row[4] as string) ?? undefined,
+      postedAt: (row[5] as string) ?? null,
+      score: Number(row[6] ?? 0),
+    }));
+  } catch (error) {
+    if (!isMissingBookmarkIndexError(error)) throw error;
+    const rows = await searchBookmarkProjections(options);
+    return rows.map((row) => ({
+      id: row.id,
+      url: row.url,
+      text: row.text,
+      authorHandle: row.authorHandle,
+      authorName: row.authorName,
+      postedAt: row.postedAt ?? null,
+      score: row.score,
     }));
   } finally {
     db.close();
@@ -471,48 +492,48 @@ export async function listBookmarks(
 ): Promise<BookmarkTimelineItem[]> {
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
-  ensureMigrations(db);
-  const limit = filters.limit ?? 30;
-  const offset = filters.offset ?? 0;
 
   try {
+    ensureMigrations(db);
     const { where, params } = buildBookmarkWhereClause(filters);
-    const sql = `
-      SELECT
-        b.id,
-        b.tweet_id,
-        b.url,
-        b.text,
-        b.author_handle,
-        b.author_name,
-        b.author_profile_image_url,
-        b.posted_at,
-        b.bookmarked_at,
-        b.categories,
-        b.primary_category,
-        b.domains,
-        b.primary_domain,
-        b.github_urls,
-        b.links_json,
-        b.media_count,
-        b.link_count,
-        b.like_count,
-        b.repost_count,
-        b.reply_count,
-        b.quote_count,
-        b.bookmark_count,
-        b.view_count
-      FROM bookmarks b
-      ${where}
-      ${bookmarkSortClause(filters.sort)}
-      LIMIT ?
-      OFFSET ?
-    `;
-    params.push(limit, offset);
-
-    const rows = db.exec(sql, params);
-    if (!rows.length) return [];
-    return rows[0].values.map((row) => mapTimelineRow(row));
+    const rows = db.exec(
+      `
+        SELECT
+          b.id,
+          b.tweet_id,
+          b.url,
+          b.text,
+          b.author_handle,
+          b.author_name,
+          b.author_profile_image_url,
+          b.posted_at,
+          b.bookmarked_at,
+          b.categories,
+          b.primary_category,
+          b.domains,
+          b.primary_domain,
+          b.github_urls,
+          b.links_json,
+          b.media_count,
+          b.link_count,
+          b.like_count,
+          b.repost_count,
+          b.reply_count,
+          b.quote_count,
+          b.bookmark_count,
+          b.view_count
+        FROM bookmarks b
+        ${where}
+        ${bookmarkSortClause(filters.sort)}
+        LIMIT ?
+        OFFSET ?
+      `,
+      [...params, filters.limit ?? 30, filters.offset ?? 0],
+    );
+    return (rows[0]?.values ?? []).map((row) => mapTimelineRow(row));
+  } catch (error) {
+    if (!isMissingBookmarkIndexError(error)) throw error;
+    return listBookmarkProjections(filters);
   } finally {
     db.close();
   }
@@ -523,17 +544,18 @@ export async function countBookmarks(
 ): Promise<number> {
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
-  ensureMigrations(db);
 
   try {
+    ensureMigrations(db);
     const { where, params } = buildBookmarkWhereClause(filters);
-    const sql = `
-      SELECT COUNT(*)
-      FROM bookmarks b
-      ${where}
-    `;
-    const rows = db.exec(sql, params);
+    const rows = db.exec(
+      `SELECT COUNT(*) FROM bookmarks b ${where}`,
+      params,
+    );
     return Number(rows[0]?.values?.[0]?.[0] ?? 0);
+  } catch (error) {
+    if (!isMissingBookmarkIndexError(error)) throw error;
+    return countBookmarkProjections(filters);
   } finally {
     db.close();
   }
@@ -609,41 +631,46 @@ export async function exportBookmarksForSyncSeed(): Promise<BookmarkRecord[]> {
 export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem | null> {
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
-  ensureMigrations(db);
 
   try {
+    ensureMigrations(db);
     const rows = db.exec(
-      `SELECT
-        b.id,
-        b.tweet_id,
-        b.url,
-        b.text,
-        b.author_handle,
-        b.author_name,
-        b.author_profile_image_url,
-        b.posted_at,
-        b.bookmarked_at,
-        b.categories,
-        b.primary_category,
-        b.domains,
-        b.primary_domain,
-        b.github_urls,
-        b.links_json,
-        b.media_count,
-        b.link_count,
-        b.like_count,
-        b.repost_count,
-        b.reply_count,
-        b.quote_count,
-        b.bookmark_count,
-        b.view_count
-      FROM bookmarks b
-      WHERE b.id = ?
-      LIMIT 1`,
-      [id]
+      `
+        SELECT
+          b.id,
+          b.tweet_id,
+          b.url,
+          b.text,
+          b.author_handle,
+          b.author_name,
+          b.author_profile_image_url,
+          b.posted_at,
+          b.bookmarked_at,
+          b.categories,
+          b.primary_category,
+          b.domains,
+          b.primary_domain,
+          b.github_urls,
+          b.links_json,
+          b.media_count,
+          b.link_count,
+          b.like_count,
+          b.repost_count,
+          b.reply_count,
+          b.quote_count,
+          b.bookmark_count,
+          b.view_count
+        FROM bookmarks b
+        WHERE b.id = ? OR b.tweet_id = ?
+        LIMIT 1
+      `,
+      [id, id],
     );
     const row = rows[0]?.values?.[0];
     return row ? mapTimelineRow(row) : null;
+  } catch (error) {
+    if (!isMissingBookmarkIndexError(error)) throw error;
+    return getBookmarkProjectionById(id);
   } finally {
     db.close();
   }

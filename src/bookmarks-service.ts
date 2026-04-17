@@ -1,7 +1,7 @@
 import { getTwitterBookmarksStatus, latestBookmarkSyncAt } from './bookmarks.js';
-import { buildIndex } from './bookmarks-db.js';
-import { loadTwitterOAuthToken } from './xauth.js';
-import { syncBookmarksGraphQL, type SyncProgress } from './graphql-bookmarks.js';
+import { buildIndex, countBookmarks } from './bookmarks-db.js';
+import { syncBookmarks } from './bookmark-sync.js';
+import type { SyncProgress } from './graphql-bookmarks.js';
 
 export interface BookmarkEnableResult {
   synced: boolean;
@@ -20,7 +20,7 @@ export interface BookmarkStatusView {
 }
 
 export async function enableBookmarks(): Promise<BookmarkEnableResult> {
-  const syncResult = await syncBookmarksGraphQL({
+  const syncResult = await syncBookmarks({
     onProgress: (status: SyncProgress) => {
       if (status.page % 25 === 0 || status.done) {
         process.stderr.write(
@@ -47,13 +47,16 @@ export async function enableBookmarks(): Promise<BookmarkEnableResult> {
 }
 
 export async function getBookmarkStatusView(): Promise<BookmarkStatusView> {
-  const token = await loadTwitterOAuthToken();
   const status = await getTwitterBookmarksStatus();
+  let bookmarkCount = status.totalBookmarks;
+  try {
+    bookmarkCount = await countBookmarks();
+  } catch {}
   return {
-    connected: Boolean(token?.access_token),
-    bookmarkCount: status.totalBookmarks,
+    connected: true,
+    bookmarkCount,
     lastUpdated: latestBookmarkSyncAt(status),
-    mode: token?.access_token ? 'Incremental by default (GraphQL + API available)' : 'Incremental by default (GraphQL)',
+    mode: 'Primary: browser-session GraphQL',
     cachePath: status.cachePath,
   };
 }

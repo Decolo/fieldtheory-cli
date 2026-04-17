@@ -44,8 +44,26 @@ const LIKE_FIXTURE = {
   ingestedVia: 'graphql',
 };
 
-async function startMockXServer(options: { unlikeStatus?: number; unbookmarkStatus?: number } = {}) {
+async function startMockXServer(options: { unlikeStatus?: number; unbookmarkStatus?: number; bookmarkStatus?: number } = {}) {
   const server = http.createServer(async (req, res) => {
+    if (req.url?.startsWith('/tweet-result')) {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      assert.equal(url.searchParams.get('id'), 'b1');
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        id_str: 'b1',
+        text: 'Saved bookmark',
+        created_at: '2026-03-01T00:00:00Z',
+        user: {
+          screen_name: 'alice',
+          name: 'Alice',
+          profile_image_url_https: 'https://img.example.com/alice.jpg',
+        },
+        mediaDetails: [],
+      }));
+      return;
+    }
+
     const body = await new Promise<string>((resolve) => {
       let data = '';
       req.on('data', (chunk) => { data += chunk; });
@@ -71,6 +89,14 @@ async function startMockXServer(options: { unlikeStatus?: number; unbookmarkStat
       const status = options.unbookmarkStatus ?? 200;
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(status === 200 ? JSON.stringify({ data: { tweet_bookmark_delete: 'Done' } }) : 'upstream failure');
+      return;
+    }
+
+    if (req.url?.includes('/aoDbu3RHznuiSkQ9aNM67Q/CreateBookmark')) {
+      assert.equal(parsed.variables?.tweet_id, 'b1');
+      const status = options.bookmarkStatus ?? 200;
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(status === 200 ? JSON.stringify({ data: { tweet_bookmark_put: 'Done' } }) : 'upstream failure');
       return;
     }
 
@@ -133,13 +159,13 @@ test('ft likes unlike removes the item remotely and from the local archive', asy
   });
 });
 
-test('ft unbookmark removes the item remotely and from the local archive', async () => {
+test('ft bookmarks unbookmark removes the item remotely and from the local archive', async () => {
   await withCliDataDir(async (dir) => {
     const mockX = await startMockXServer();
     const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
 
     try {
-      const { stdout } = await execFileAsync(tsx, ['src/cli.ts', 'unbookmark', 'b1', '--cookies', 'ct0-token', 'auth'], {
+      const { stdout } = await execFileAsync(tsx, ['src/cli.ts', 'bookmarks', 'unbookmark', 'b1', '--cookies', 'ct0-token', 'auth'], {
         cwd: process.cwd(),
         env: { ...process.env, FT_DATA_DIR: dir, FT_X_API_ORIGIN: mockX.origin },
       });
@@ -148,6 +174,34 @@ test('ft unbookmark removes the item remotely and from the local archive', async
       assert.equal(await getBookmarkById('b1'), null);
       const bookmarksCache = await readFile(path.join(dir, 'bookmarks.jsonl'), 'utf8');
       assert.equal(bookmarksCache.trim(), '');
+    } finally {
+      await mockX.close();
+    }
+  });
+});
+
+test('ft bookmarks add creates the bookmark remotely and refreshes the local archive', async () => {
+  await withCliDataDir(async (dir) => {
+    const mockX = await startMockXServer();
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+
+    try {
+      const { stdout } = await execFileAsync(tsx, ['src/cli.ts', 'bookmarks', 'add', 'b1', '--cookies', 'ct0-token', 'auth'], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          FT_DATA_DIR: dir,
+          FT_X_API_ORIGIN: mockX.origin,
+          FT_X_SYNDICATION_URL: `${mockX.origin}/tweet-result`,
+          FT_X_CLIENT_TRANSACTION_ID: 'test-transaction-id',
+        },
+      });
+
+      assert.match(stdout, /Created bookmark on X: b1/);
+      assert.match(stdout, /Local archive: updated cached record/);
+      assert.ok(await getBookmarkById('b1'));
+      const bookmarksCache = await readFile(path.join(dir, 'bookmarks.jsonl'), 'utf8');
+      assert.match(bookmarksCache, /Saved bookmark/);
     } finally {
       await mockX.close();
     }
