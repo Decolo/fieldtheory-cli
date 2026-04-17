@@ -88,8 +88,22 @@ export function formatFeedAgentStatus(view: FeedAgentStatusView): string {
 export function formatFeedAgentLog(entries: FeedAgentLogEntry[]): string {
   if (entries.length === 0) return 'No feed agent runs recorded yet.';
   return entries.map((entry) => {
-    const actions = `like=${entry.actions.like} bookmark=${entry.actions.bookmark}`;
-    return `${entry.timestamp}  ${entry.decision}  ${entry.tweetId}  ${entry.authorHandle ? `@${entry.authorHandle}` : '@?'}  like=${entry.likeScore.toFixed(2)} bookmark=${entry.bookmarkScore.toFixed(2)}  ${actions}\n  ${entry.url}`;
+    const likeDetail = entry.actionDetails?.like;
+    const bookmarkDetail = entry.actionDetails?.bookmark;
+    const formatAction = (
+      name: 'like' | 'bookmark',
+      status: FeedAgentLogEntry['actions']['like'],
+      detail?: { attempts?: number; retryable?: boolean; errorKind?: string },
+    ): string => {
+      const bits: string[] = [];
+      if ((detail?.attempts ?? 1) > 1) bits.push(`attempts=${detail?.attempts}`);
+      if (status === 'failed' && detail?.errorKind) bits.push(`kind=${detail.errorKind}`);
+      if (status === 'failed' && detail?.retryable != null) bits.push(`retryable=${detail.retryable ? 'yes' : 'no'}`);
+      return bits.length > 0 ? `${name}=${status}(${bits.join(',')})` : `${name}=${status}`;
+    };
+    const actions = `${formatAction('like', entry.actions.like, likeDetail)} ${formatAction('bookmark', entry.actions.bookmark, bookmarkDetail)}`;
+    const errorLine = entry.error ? `\n  error: ${entry.error}` : '';
+    return `${entry.timestamp}  ${entry.decision}  ${entry.tweetId}  ${entry.authorHandle ? `@${entry.authorHandle}` : '@?'}  like=${entry.likeScore.toFixed(2)} bookmark=${entry.bookmarkScore.toFixed(2)}  ${actions}\n  ${entry.url}${errorLine}`;
   }).join('\n\n');
 }
 

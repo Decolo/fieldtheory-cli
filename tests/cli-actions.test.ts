@@ -334,3 +334,52 @@ test('ft likes trim retries a 429 before succeeding', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('ft likes unlike retries a transient 500 before succeeding', async () => {
+  await withCliDataDir(async (dir) => {
+    let requests = 0;
+    const server = http.createServer(async (req, res) => {
+      const body = await new Promise<string>((resolve) => {
+        let data = '';
+        req.on('data', (chunk) => { data += chunk; });
+        req.on('end', () => resolve(data));
+      });
+
+      if (req.method !== 'POST' || !req.url?.includes('/ZYKSe-w7KEslx3JhSIk5LA/UnfavoriteTweet')) {
+        res.writeHead(404).end('not found');
+        return;
+      }
+
+      const parsed = body ? JSON.parse(body) : {};
+      assert.equal(parsed.variables?.tweet_id, 'l1');
+      requests += 1;
+
+      if (requests === 1) {
+        res.writeHead(500, { 'content-type': 'text/plain' });
+        res.end('temporary failure');
+        return;
+      }
+
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { unfavorite_tweet: 'Done' } }));
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Failed to bind transient unlike server.');
+
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    try {
+      const { stdout } = await execFileAsync(tsx, ['src/cli.ts', 'likes', 'unlike', 'l1', '--cookies', 'ct0-token', 'auth'], {
+        cwd: process.cwd(),
+        env: { ...process.env, FT_DATA_DIR: dir, FT_X_API_ORIGIN: `http://127.0.0.1:${address.port}` },
+      });
+
+      assert.match(stdout, /Unliked on X: l1/);
+      assert.equal(requests, 2);
+      assert.equal(await getLikeById('l1'), null);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+});

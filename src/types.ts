@@ -249,6 +249,35 @@ export interface FeedPreferences {
   bookmark: FeedPreferenceBucket;
 }
 
+export type FeedDaemonStage = 'fetch' | 'semantic' | 'consume' | 'tick';
+export type FeedDaemonOutcome = 'success' | 'error';
+export type FeedDaemonErrorKind =
+  | 'network'
+  | 'auth'
+  | 'rate_limit'
+  | 'upstream'
+  | 'semantic'
+  | 'action'
+  | 'config'
+  | 'unknown';
+
+export interface FeedDaemonLastTick {
+  tickId: string;
+  startedAt: string;
+  finishedAt: string;
+  stage: FeedDaemonStage;
+  outcome: FeedDaemonOutcome;
+  errorKind?: FeedDaemonErrorKind;
+  summary?: string;
+  durationMs: number;
+  fetchAdded?: number;
+  fetchTotalItems?: number;
+  consumed?: number;
+  liked?: number;
+  bookmarked?: number;
+  failed?: number;
+}
+
 export interface FeedDaemonState {
   schemaVersion: number;
   pid?: number;
@@ -263,6 +292,7 @@ export interface FeedDaemonState {
   lastFailed?: number;
   lastError?: string;
   intervalMs?: number;
+  lastTick?: FeedDaemonLastTick;
 }
 
 export interface FeedAgentLogEntry {
@@ -277,6 +307,18 @@ export interface FeedAgentLogEntry {
   actions: {
     like: 'applied' | 'already-done' | 'skipped' | 'planned' | 'failed';
     bookmark: 'applied' | 'already-done' | 'skipped' | 'planned' | 'failed';
+  };
+  actionDetails?: {
+    like?: {
+      attempts?: number;
+      retryable?: boolean;
+      errorKind?: 'network' | 'auth' | 'rate_limit' | 'upstream' | 'unknown';
+    };
+    bookmark?: {
+      attempts?: number;
+      retryable?: boolean;
+      errorKind?: 'network' | 'auth' | 'rate_limit' | 'upstream' | 'unknown';
+    };
   };
   reasons: string[];
   error?: string;

@@ -1,6 +1,6 @@
 import { pathExists, readJson, readJsonLines, writeJson, writeJsonLines } from './fs.js';
 import { ensureDataDir, twitterFeedCachePath, twitterFeedIndexPath, twitterFeedMetaPath, twitterFeedStatePath } from './paths.js';
-import { resolveXSessionAuth, buildGraphqlUrl, buildXGraphqlHeaders, fetchXResource, type XSessionOptions } from './x-graphql.js';
+import { resolveXSessionAuth, buildGraphqlUrl, buildXGraphqlHeaders, fetchXResource, XRequestError, type XSessionOptions } from './x-graphql.js';
 import type { FeedBackfillState, FeedCacheMeta, FeedRecord } from './types.js';
 import { buildFeedIndex } from './feed-db.js';
 
@@ -395,25 +395,33 @@ async function fetchPageWithRetry(
 
     if (response.status === 429) {
       const waitSec = Math.min(15 * Math.pow(2, attempt), 120);
-      lastError = new Error(`Rate limited (429) on attempt ${attempt + 1}`);
+      lastError = new XRequestError(`Home timeline rate limited (429) on attempt ${attempt + 1}.`, {
+        kind: 'rate_limit',
+        status: 429,
+      });
       await new Promise((r) => setTimeout(r, waitSec * 1000));
       continue;
     }
 
     if (response.status >= 500) {
-      lastError = new Error(`Server error (${response.status}) on attempt ${attempt + 1}`);
+      lastError = new XRequestError(`Home timeline server error (${response.status}) on attempt ${attempt + 1}.`, {
+        kind: 'upstream',
+        status: response.status,
+      });
       await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
       continue;
     }
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(
-        `Home timeline API returned ${response.status}.\n` +
-        `Response: ${text.slice(0, 300)}\n\n` +
-        (response.status === 401 || response.status === 403
-          ? 'Fix: Your X session may have expired. Open your browser, go to https://x.com, and make sure you are logged in. Then retry.'
-          : 'This may be a temporary issue. Try again in a few minutes.')
+      throw new XRequestError(
+        response.status === 401 || response.status === 403
+          ? `Home timeline request unauthorized (${response.status}). Refresh your X session in the browser and retry.`
+          : `Home timeline API returned ${response.status}. Response: ${text.slice(0, 300)}`,
+        {
+          kind: response.status === 401 || response.status === 403 ? 'auth' : 'upstream',
+          status: response.status,
+        },
       );
     }
 
@@ -421,7 +429,9 @@ async function fetchPageWithRetry(
     return parseHomeTimelineResponse(json);
   }
 
-  throw lastError ?? new Error('Home timeline API: all retry attempts failed. Try again later.');
+  throw lastError ?? new XRequestError('Home timeline API: all retry attempts failed. Try again later.', {
+    kind: 'upstream',
+  });
 }
 
 function updateState(

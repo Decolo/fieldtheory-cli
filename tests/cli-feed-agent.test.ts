@@ -14,9 +14,15 @@ import { writeJson } from '../src/fs.js';
 
 const execFileAsync = promisify(execFile);
 
-async function withCliAgentData(fn: (dir: string, origin: string) => Promise<void>): Promise<void> {
+async function withCliAgentData(
+  fn: (dir: string, origin: string) => Promise<void>,
+  options: { favoriteStatuses?: number[]; bookmarkStatuses?: number[] } = {},
+): Promise<void> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-cli-feed-agent-'));
   process.env.FT_DATA_DIR = dir;
+  process.env.FT_X_CLIENT_TRANSACTION_ID = 'test-transaction-id';
+  const favoriteStatuses = [...(options.favoriteStatuses ?? [])];
+  const bookmarkStatuses = [...(options.bookmarkStatuses ?? [])];
 
   const server = http.createServer(async (req, res) => {
     const body = await new Promise<string>((resolve) => {
@@ -46,8 +52,11 @@ async function withCliAgentData(fn: (dir: string, origin: string) => Promise<voi
     if (req.url?.includes('/FavoriteTweet') || req.url?.includes('/CreateBookmark')) {
       assert.equal(parsed.variables?.tweet_id, 'fd-1');
       const key = req.url.includes('/FavoriteTweet') ? 'favorite_tweet' : 'tweet_bookmark_put';
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ data: { [key]: 'Done' } }));
+      const status = req.url.includes('/FavoriteTweet')
+        ? (favoriteStatuses.shift() ?? 200)
+        : (bookmarkStatuses.shift() ?? 200);
+      res.writeHead(status, { 'content-type': status === 200 ? 'application/json' : 'text/plain' });
+      res.end(status === 200 ? JSON.stringify({ data: { [key]: 'Done' } }) : 'temporary action failure');
       return;
     }
 
@@ -119,6 +128,7 @@ async function withCliAgentData(fn: (dir: string, origin: string) => Promise<voi
     await fn(dir, `http://127.0.0.1:${address.port}`);
   } finally {
     delete process.env.FT_DATA_DIR;
+    delete process.env.FT_X_CLIENT_TRANSACTION_ID;
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     await rm(dir, { recursive: true, force: true });
   }
@@ -229,6 +239,33 @@ test('ft feed agent status and log expose persisted agent output', async () => {
   });
 });
 
+test('ft feed agent log includes retry metadata for transient action recovery', async () => {
+  await withCliAgentData(async (dir, origin) => {
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    await execFileAsync(tsx, [
+      'src/cli.ts', 'feed', 'agent', 'run',
+      '--max-pages', '0',
+      '--cookies', 'ct0-token', 'auth',
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        FT_DATA_DIR: dir,
+        FT_X_API_ORIGIN: origin,
+        FT_EMBEDDING_API_KEY: 'test-key',
+        FT_EMBEDDING_BASE_URL: origin,
+      },
+    });
+
+    const { stdout: logOut } = await execFileAsync(tsx, ['src/cli.ts', 'feed', 'agent', 'log', '--limit', '5'], {
+      cwd: process.cwd(),
+      env: { ...process.env, FT_DATA_DIR: dir },
+    });
+
+    assert.match(logOut, /like=applied\(attempts=2\)/);
+  }, { favoriteStatuses: [500, 200] });
+});
+
 test('ft feed prefs commands persist explicit preferences', async () => {
   await withCliAgentData(async (dir) => {
     const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
@@ -261,6 +298,40 @@ test('ft feed daemon status prints daemon state even before start', async () => 
 
     assert.match(stdout, /Feed Daemon/);
     assert.match(stdout, /running: no/);
+    assert.match(stdout, /last stage: unknown/);
+    assert.match(stdout, /last summary: none/);
+  });
+});
+
+test('ft feed daemon status prints redacted structured error summaries', async () => {
+  await withCliAgentData(async (dir) => {
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    await writeJson(path.join(dir, 'feed-daemon-state.json'), {
+      schemaVersion: 1,
+      intervalMs: 1_200_000,
+      lastError: 'Command failed: curl -H cookie: ct0=csrf-secret; auth_token=auth-secret -H authorization: Bearer secret-token',
+      lastTick: {
+        tickId: 'tick-err',
+        startedAt: '2026-04-15T10:52:25.763Z',
+        finishedAt: '2026-04-15T10:55:36.951Z',
+        stage: 'fetch',
+        outcome: 'error',
+        errorKind: 'network',
+        summary: 'X request failed during curl fallback: curl: (35) Recv failure: Connection reset by peer',
+        durationMs: 1234,
+      },
+    });
+
+    const { stdout } = await execFileAsync(tsx, ['src/cli.ts', 'feed', 'daemon', 'status'], {
+      cwd: process.cwd(),
+      env: { ...process.env, FT_DATA_DIR: dir },
+    });
+
+    assert.match(stdout, /last stage: fetch/);
+    assert.match(stdout, /last outcome: error/);
+    assert.match(stdout, /last error kind: network/);
+    assert.match(stdout, /Connection reset by peer/);
+    assert.doesNotMatch(stdout, /csrf-secret|auth-secret|secret-token/);
   });
 });
 

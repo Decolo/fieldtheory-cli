@@ -30,22 +30,21 @@ export interface XSessionAuth {
 export type XRequestErrorKind = 'network' | 'auth' | 'rate_limit' | 'upstream' | 'unknown';
 
 export class XRequestError extends Error {
-  readonly kind: XRequestErrorKind;
-  readonly status?: number;
-  readonly fallbackUsed: boolean;
-  readonly summary: string;
+  kind: XRequestErrorKind;
+  status?: number;
+  fallbackUsed?: boolean;
+  summary: string;
 
-  constructor(summary: string, options: {
-    kind: XRequestErrorKind;
-    status?: number;
-    fallbackUsed?: boolean;
-  }) {
-    super(summary);
+  constructor(
+    message: string,
+    options: { kind?: XRequestErrorKind; status?: number; fallbackUsed?: boolean; summary?: string } = {},
+  ) {
+    super(message);
     this.name = 'XRequestError';
-    this.kind = options.kind;
+    this.kind = options.kind ?? 'unknown';
     this.status = options.status;
-    this.fallbackUsed = Boolean(options.fallbackUsed);
-    this.summary = summary;
+    this.fallbackUsed = options.fallbackUsed;
+    this.summary = options.summary ?? message;
   }
 }
 
@@ -61,42 +60,25 @@ export function buildGraphqlUrl(queryId: string, operationName: string): string 
 
 export function buildXGraphqlHeaders(session: XSessionAuth): Record<string, string> {
   const origin = xGraphqlOrigin();
-  return {
+  const headers: Record<string, string> = {
     authorization: `Bearer ${X_PUBLIC_BEARER}`,
     'x-csrf-token': session.csrfToken,
     'x-twitter-auth-type': 'OAuth2Session',
     'x-twitter-active-user': 'yes',
     'x-twitter-client-language': 'en',
+    'content-type': 'application/json',
     accept: '*/*',
     'accept-language': 'en-US,en;q=0.9',
-    'content-type': 'application/json',
     origin,
     referer: `${origin}/home`,
     'user-agent': CHROME_UA,
     cookie: session.cookieHeader ?? `ct0=${session.csrfToken}`,
   };
-}
 
-function shouldFallbackToCurl(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const codes = [
-    (error as any)?.code,
-    (error as any)?.cause?.code,
-    (error as any)?.errno,
-    (error as any)?.cause?.errno,
-  ].filter((value): value is string => typeof value === 'string');
+  const transactionId = process.env.FT_X_CLIENT_TRANSACTION_ID?.trim();
+  if (transactionId) headers['x-client-transaction-id'] = transactionId;
 
-  return codes.some((code) =>
-    [
-      'UND_ERR_CONNECT_TIMEOUT',
-      'UND_ERR_CONNECT_ERROR',
-      'ECONNRESET',
-      'ECONNREFUSED',
-      'ETIMEDOUT',
-      'EHOSTUNREACH',
-      'ENETUNREACH',
-    ].includes(code),
-  );
+  return headers;
 }
 
 function sanitizeCookieHeader(value: string): string {
@@ -121,6 +103,28 @@ export function sanitizeSensitiveText(input: string): string {
     .replace(/([?&;]auth_token=)[^;&\s'"]+/gi, '$1[REDACTED]')
     .replace(/([?&;]ct0=)[^;&\s'"]+/gi, '$1[REDACTED]')
     .replace(/(Bearer\s+)[A-Za-z0-9%._~=-]+/g, '$1[REDACTED]');
+}
+
+function shouldFallbackToCurl(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const codes = [
+    (error as any)?.code,
+    (error as any)?.cause?.code,
+    (error as any)?.errno,
+    (error as any)?.cause?.errno,
+  ].filter((value): value is string => typeof value === 'string');
+
+  return codes.some((code) =>
+    [
+      'UND_ERR_CONNECT_TIMEOUT',
+      'UND_ERR_CONNECT_ERROR',
+      'ECONNRESET',
+      'ECONNREFUSED',
+      'ETIMEDOUT',
+      'EHOSTUNREACH',
+      'ENETUNREACH',
+    ].includes(code),
+  );
 }
 
 function classifyTransportFailure(detail: string): XRequestErrorKind {
@@ -210,8 +214,24 @@ export async function fetchXResource(input: string, init?: RequestInit): Promise
   try {
     return await fetch(input, init);
   } catch (error) {
-    if (!shouldFallbackToCurl(error)) throw error;
-    return fetchViaCurl(input, init);
+    if (!shouldFallbackToCurl(error)) {
+      throw new XRequestError(error instanceof Error ? error.message : String(error), {
+        kind: 'network',
+        summary: sanitizeSensitiveText(error instanceof Error ? error.message : String(error)),
+      });
+    }
+
+    try {
+      return await fetchViaCurl(input, init);
+    } catch (fallbackError) {
+      if (fallbackError instanceof XRequestError) throw fallbackError;
+      const message = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+      throw new XRequestError(`X request failed during curl fallback: ${message}`, {
+        kind: 'network',
+        fallbackUsed: true,
+        summary: sanitizeSensitiveText(`X request failed during curl fallback: ${message}`),
+      });
+    }
   }
 }
 

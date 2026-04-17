@@ -72,9 +72,9 @@ On first run, `ft sync`, `ft likes sync`, and `ft feed sync` reuse your browser 
 | `ft feed sync` | Fetch Home timeline tweets into a local read-only feed archive |
 | `ft feed agent run` | Sync a bounded amount of feed data, score candidates, and auto-like/bookmark matches once |
 | `ft feed daemon start --every <interval>` | Run recurring feed refresh plus immediate consumption on one timer |
-| `ft feed daemon status` | Show daemon status and the last tick result |
+| `ft feed daemon status` | Show daemon status and the last structured tick summary |
 | `ft feed daemon stop` | Stop the recurring daemon process |
-| `ft feed daemon log` | Show daemon state plus log file location |
+| `ft feed daemon log` | Show daemon state plus the redacted append-only log location |
 | `ft feed semantic status` | Show embedding provider config and local vector coverage |
 | `ft feed semantic rebuild` | Rebuild vectors for feed, likes, bookmarks, and topic preferences |
 | `ft feed prefs show` | Show explicit feed preference rules |
@@ -228,7 +228,7 @@ ft unbookmark <tweet-id>
 ft likes unlike <tweet-id>
 ```
 
-Both commands reuse your browser-authenticated X web session, then reconcile the matching local archive entry and index.
+Both commands reuse your browser-authenticated X web session, then reconcile the matching local archive entry and index. Remote write actions now apply one conservative retry policy for transient failures only: network/transport errors, HTTP `429`, and HTTP `5xx` are retried up to 2 extra times with short `1s -> 3s` backoff, while auth failures such as `401/403` still fail fast. Bookmark-create `404` responses are now surfaced as likely X web contract/header mismatches rather than being mislabeled as temporary upstream issues.
 
 For bulk likes cleanup, use the formal trim command:
 
@@ -291,7 +291,7 @@ The daemon runs one simple loop: refresh feed, hand just the newly seen items to
 - avoid replaying already-successful actions for the same tweet/action pair
 - write durable local state and append-only logs for later inspection
 
-`ft feed daemon status` shows whether the recurring loop is alive and how the last tick ended. `ft feed semantic status` shows whether embeddings are configured and how much local vector coverage exists. `ft feed agent status` and `ft feed agent log` show cumulative action history. `--dry-run` is useful when tuning thresholds and explicit preferences before letting the system act live.
+`ft feed daemon status` shows whether the recurring loop is alive plus the last stage, outcome, error kind, duration, and redacted summary for the most recent tick. `feed-daemon.log` remains an append-only local artifact for stage-by-stage follow-up, but transport secrets are redacted before errors reach status/log output. `ft feed semantic status` shows whether embeddings are configured and how much local vector coverage exists. `ft feed agent status` and `ft feed agent log` show cumulative action history, including when an action needed multiple attempts before succeeding or finally failed. `--dry-run` is useful when tuning thresholds and explicit preferences before letting the system act live.
 
 ## Hybrid search
 
@@ -372,7 +372,7 @@ Session sync extracts cookies from your browser's local database. Use `ft sync -
 
 **The feed archive sync uses the same browser-authenticated X web session path.** In v1 it is read-only, CLI-first, and stores tweet-only Home timeline entries for local browsing.
 
-**Remote unlike, unbookmark, likes trim, and feed-agent auto-actions use the same browser-authenticated X web session path.** On success, the CLI also reconciles the matching local cached records and rebuilds the relevant search index.
+**Remote unlike, unbookmark, likes trim, and feed-agent auto-actions use the same browser-authenticated X web session path.** On success, the CLI also reconciles the matching local cached records and rebuilds the relevant search index. Single-item remote write actions now retry only transient failures (`network`, `429`, `5xx`) with bounded backoff before surfacing an error.
 
 ## License
 

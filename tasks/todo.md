@@ -1,3 +1,70 @@
+# 2026-04-15 x bookmark mutation 404 investigation
+
+## Plan
+
+- [x] Unit 1: verify the current X web mutation contract for bookmark create/delete/favorite operations against live web assets
+- [x] Unit 2: update the bookmark mutation implementation to match the verified contract and improve non-retryable 404 reporting
+- [x] Unit 3: add regression coverage for the corrected bookmark action path and any changed error classification
+- [x] Verification: run targeted action/feed tests plus a build
+- [x] Review: confirm the bookmark 404 failure mode is addressed without regressing like/unbookmark flows
+
+## Review
+
+- Verified against the live X web bundle that `CreateBookmark`, `DeleteBookmark`, `FavoriteTweet`, and `UnfavoriteTweet` still use the current query ids already in the repo, and confirmed the bookmark mutation still only passes `tweet_id` in the bundle-level call site.
+- Confirmed the remaining implementation gap is not the mutation body shape but the surrounding web-client envelope, so `buildXGraphqlHeaders()` now sends the same baseline language/origin headers the browser client normally includes.
+- Updated bookmark-create `404` handling in `src/graphql-actions.ts` so operators now see a contract-mismatch diagnosis instead of a misleading "temporary X issue" hint, while preserving fail-fast non-retryable behavior.
+- Added regression coverage in `tests/graphql-actions.test.ts` and `tests/x-graphql.test.ts` for the new baseline headers and the bookmark-specific `404` classification.
+- Verification passed:
+  - `./node_modules/.bin/tsx --test tests/graphql-actions.test.ts tests/x-graphql.test.ts`
+  - `npm run build`
+
+# 2026-04-15 x action retry hardening
+
+## Plan
+
+- [x] Unit 1: add one shared retry policy for remote X write actions in `src/graphql-actions.ts`
+- [x] Unit 2: route feed and CLI action paths through the shared retry behavior without changing their conservative failure semantics
+- [x] Unit 3: add regression coverage for transient retry success and non-retryable failures
+- [x] Unit 4: update docs so the action-layer reliability behavior is discoverable
+- [x] Verification: run targeted action/feed tests and a build
+- [x] Review: confirm retries stay bounded, conservative, and observable
+
+## Review
+
+- Added one bounded retry policy in `src/graphql-actions.ts` for `like`, `bookmark`, `unlike`, and `unbookmark`, limited to transport/network failures plus HTTP `429` and `5xx`, with conservative `1s -> 3s` backoff.
+- Kept action failure semantics conservative: after retries are exhausted, `RemoteTweetActionError` now carries attempt metadata and still bubbles up so CLI commands fail clearly while feed automation can continue recording a per-item action failure.
+- Extended `feed-agent-log.jsonl`, `ft feed agent log`, and daemon `consume_ok` events with retry-oriented metadata so operators can see whether actions succeeded on the first try, succeeded after retry, or failed after exhausting the retry budget.
+- Added regression coverage in `tests/graphql-actions.test.ts`, `tests/cli-actions.test.ts`, `tests/feed-agent.test.ts`, and `tests/cli-feed-agent.test.ts` for transient retry success, fail-fast `403` behavior, and operator-visible retry metadata.
+- Updated `README.md` and `docs/README.md` so both the action-layer retry behavior and the richer feed-agent log output are discoverable.
+- Verification passed:
+  - `./node_modules/.bin/tsx --test tests/graphql-actions.test.ts`
+  - `./node_modules/.bin/tsx --test tests/cli-actions.test.ts`
+  - `./node_modules/.bin/tsx --test tests/feed-agent.test.ts tests/cli-feed-agent.test.ts`
+  - `npm run build`
+
+# 2026-04-15 feed daemon observability hardening
+
+## Plan
+
+- [x] Unit 1: sanitize transport-layer failures and normalize them into secret-safe typed errors
+- [x] Unit 2: replace daemon raw error storage with structured stage-aware state and append-only event logs
+- [x] Unit 3: align `ft feed daemon status|log` plus docs with the new observability contract
+- [x] Unit 4: add regression coverage for secret redaction and stage/error classification
+- [x] Verification: run targeted observability tests and a build
+- [x] Review: validate that status/log output is actionable without leaking session credentials
+
+## Review
+
+- Added `XRequestError` plus `sanitizeSensitiveText()` in `src/x-graphql.ts` so transport failures are classified and redacted before higher layers ever see them.
+- Updated `src/graphql-feed.ts` to preserve typed `auth`, `rate_limit`, and `upstream` failure metadata instead of collapsing everything into plain `Error` strings.
+- Refactored `src/feed-daemon.ts` and `src/types.ts` so daemon state now persists a structured `lastTick` summary and append-only log events such as `fetch_start`, `fetch_ok`, `semantic_ok`, `consume_ok`, and `*_error`.
+- `ft feed daemon status` now reports stage, outcome, error kind, summary, and duration, while legacy raw `lastError` fallbacks are redacted before display.
+- Updated `src/cli.ts`, `README.md`, and `docs/README.md` so operator-facing docs match the new observability contract.
+- Added regression coverage in `tests/x-graphql.test.ts`, `tests/feed-daemon.test.ts`, and `tests/cli-feed-agent.test.ts` for redaction and structured status output.
+- Verification passed:
+  - `./node_modules/.bin/tsx --test tests/x-graphql.test.ts tests/feed-daemon.test.ts tests/graphql-feed.test.ts tests/cli-feed-agent.test.ts`
+  - `npm run build`
+
 # 2026-04-15 feed semantic vector retrieval
 
 ## Plan
