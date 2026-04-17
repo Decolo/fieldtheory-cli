@@ -2,7 +2,7 @@ export type ArchiveSource = 'bookmarks' | 'likes';
 export type HybridSearchSource = 'bookmarks' | 'likes' | 'feed';
 export type HybridSearchMode = 'topic' | 'action';
 export type HybridSearchScope = HybridSearchSource | 'all';
-export type ViewSource = 'search' | ArchiveSource;
+export type ViewSource = 'dashboard' | 'search' | ArchiveSource;
 
 export interface StatusBucket {
   total: number;
@@ -104,4 +104,51 @@ export interface HybridSearchResponse {
 
 export interface HybridSummaryResponse extends HybridSearchResponse {
   summary: string;
+}
+
+export interface FeedMetricWindow {
+  attempts: number;
+  successes: number;
+  failures: number;
+  successRate: number;
+}
+
+export interface FeedMetricDay {
+  date: string;
+  attempts: number;
+  successes: number;
+  failures: number;
+  successRate: number;
+}
+
+export interface FeedActionDay {
+  date: string;
+  likes: number;
+  bookmarks: number;
+}
+
+export interface FeedMetricsResponse {
+  generatedAt: string;
+  feedCollection: {
+    windows: {
+      last24h: FeedMetricWindow;
+      last7d: FeedMetricWindow;
+    };
+    daily: FeedMetricDay[];
+    lastOutcome: {
+      timestamp: string;
+      outcome: 'success' | 'error';
+      kind?: string;
+      summary?: string;
+    } | null;
+  };
+  actions: {
+    totals: {
+      likes: number;
+      bookmarks: number;
+    };
+    daily: FeedActionDay[];
+    latestLikeAt: string | null;
+    latestBookmarkAt: string | null;
+  };
 }

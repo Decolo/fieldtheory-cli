@@ -1,6 +1,7 @@
 import type {
   ArchiveSource,
   BookmarkItem,
+  FeedMetricsResponse,
   HybridSearchMode,
   HybridSearchResponse,
   HybridSearchScope,
@@ -21,6 +22,10 @@ async function requestJson<T>(input: string): Promise<T> {
 
 export async function fetchStatus(): Promise<StatusResponse> {
   return requestJson<StatusResponse>('/api/status');
+}
+
+export async function fetchFeedMetrics(): Promise<FeedMetricsResponse> {
+  return requestJson<FeedMetricsResponse>('/api/feed/metrics');
 }
 
 export async function fetchArchiveList(
