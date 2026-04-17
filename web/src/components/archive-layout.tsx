@@ -1,12 +1,14 @@
 import type {
   ArchiveSource,
   BookmarkItem,
+  FeedMetricsResponse,
   HybridSearchMode,
   HybridSearchResult,
   LikeItem,
   StatusResponse,
   ViewSource,
 } from '../types';
+import { DashboardPanel } from './dashboard-panel';
 import { DetailPane } from './detail-pane';
 import { ItemList } from './item-list';
 import { SearchBar } from './search-bar';
@@ -16,12 +18,15 @@ interface ArchiveLayoutProps {
   archiveSource: ArchiveSource;
   searchMode: HybridSearchMode;
   status: StatusResponse | null;
+  metrics: FeedMetricsResponse | null;
   items: Array<BookmarkItem | LikeItem | HybridSearchResult>;
   selectedId: string | null;
   selectedItem: BookmarkItem | LikeItem | HybridSearchResult | null;
   listLoading: boolean;
   detailLoading: boolean;
   detailError: string | null;
+  metricsLoading: boolean;
+  metricsError: string | null;
   summary: string | null;
   query: string;
   onQueryChange: (value: string) => void;
@@ -39,6 +44,8 @@ function formatCount(value: number | undefined): string {
 export function ArchiveLayout(props: ArchiveLayoutProps) {
   const activeCount = props.source === 'search'
     ? props.items.length
+    : props.source === 'dashboard'
+      ? props.metrics?.feedCollection.windows.last7d.attempts
     : props.source === 'bookmarks'
       ? props.status?.bookmarks.total
       : props.status?.likes.total;
@@ -60,6 +67,15 @@ export function ArchiveLayout(props: ArchiveLayoutProps) {
         </div>
         <div className="toolbar-row toolbar-controls">
           <div className="tabs" role="tablist" aria-label="Archive type">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={props.source === 'dashboard'}
+              className={`tab${props.source === 'dashboard' ? ' is-active' : ''}`}
+              onClick={() => props.onSelectSource('dashboard')}
+            >
+              dashboard
+            </button>
             <button
               type="button"
               role="tab"
@@ -98,29 +114,41 @@ export function ArchiveLayout(props: ArchiveLayoutProps) {
               ))}
             </div>
           ) : null}
-          <SearchBar query={props.query} onQueryChange={props.onQueryChange} onSubmit={props.onSearch} />
+          {props.source !== 'dashboard' ? (
+            <SearchBar query={props.query} onQueryChange={props.onQueryChange} onSubmit={props.onSearch} />
+          ) : null}
         </div>
       </section>
 
-      <section className="workspace">
-        <aside className="list-panel">
-          <ItemList
-            items={props.items}
-            source={props.source}
-            selectedId={props.selectedId}
-            loading={props.listLoading}
-            onSelect={props.onSelectItem}
+      {props.source === 'dashboard' ? (
+        <section className="workspace workspace-dashboard">
+          <DashboardPanel
+            metrics={props.metrics}
+            loading={props.metricsLoading}
+            error={props.metricsError}
           />
-        </aside>
-        <DetailPane
-          source={props.source}
-          item={props.selectedItem}
-          loading={props.detailLoading}
-          error={props.detailError}
-          mode={props.searchMode}
-          summary={props.summary}
-        />
-      </section>
+        </section>
+      ) : (
+        <section className="workspace">
+          <aside className="list-panel">
+            <ItemList
+              items={props.items}
+              source={props.source}
+              selectedId={props.selectedId}
+              loading={props.listLoading}
+              onSelect={props.onSelectItem}
+            />
+          </aside>
+          <DetailPane
+            source={props.source}
+            item={props.selectedItem}
+            loading={props.detailLoading}
+            error={props.detailError}
+            mode={props.searchMode}
+            summary={props.summary}
+          />
+        </section>
+      )}
     </main>
   );
 }

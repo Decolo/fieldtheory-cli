@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { countBookmarks, getBookmarkById, listBookmarks, type BookmarkTimelineFilters } from './bookmarks-db.js';
 import { countLikes, getLikeById, listLikes, type LikeTimelineFilters } from './likes-db.js';
 import { countFeed } from './feed-db.js';
+import { getFeedMetricsSnapshot } from './feed-metrics.js';
 import { runHybridSearch } from './hybrid-search.js';
 import {
   dataDir,
@@ -22,6 +23,7 @@ import type {
   ApiHybridSearchResponse,
   ApiHybridSummaryResponse,
   ApiListResponse,
+  ApiFeedMetricsResponse,
   ApiStatusResponse,
   HybridSearchMode,
   HybridSearchScope,
@@ -121,6 +123,11 @@ export async function createWebApp(options: WebServerOptions = {}): Promise<Hono
         hasIndex: fs.existsSync(twitterFeedIndexPath()),
       },
     };
+    return c.json(response);
+  });
+
+  app.get('/api/feed/metrics', async (c) => {
+    const response: ApiFeedMetricsResponse = await getFeedMetricsSnapshot();
     return c.json(response);
   });
 

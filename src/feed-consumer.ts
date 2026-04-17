@@ -1,6 +1,6 @@
 import { appendLine, pathExists, readJson, readJsonLines, writeJson } from './fs.js';
 import { upsertBookmarksInArchive, upsertLikesInArchive } from './archive-actions.js';
-import { bookmarkTweet, likeTweet } from './graphql-actions.js';
+import { RemoteTweetActionError, bookmarkTweet, likeTweet } from './graphql-actions.js';
 import { loadFeedPreferences } from './feed-preferences.js';
 import { scoreSemanticItem } from './feed-semantic-scorer.js';
 import { SemanticStore } from './semantic-store.js';
@@ -41,6 +41,7 @@ export interface FeedConsumeResult {
   bookmarked: number;
   skipped: number;
   failed: number;
+  actionRetries: number;
   statePath: string;
   logPath: string;
 }
@@ -140,6 +141,17 @@ async function appendLog(entry: FeedAgentLogEntry): Promise<void> {
   await appendLine(twitterFeedAgentLogPath(), JSON.stringify(entry));
 }
 
+function actionErrorDetail(error: unknown): NonNullable<FeedAgentLogEntry['actionDetails']>[keyof NonNullable<FeedAgentLogEntry['actionDetails']>] {
+  if (error instanceof RemoteTweetActionError) {
+    return {
+      attempts: error.attempts,
+      retryable: error.retryable,
+      errorKind: error.kind ?? 'unknown',
+    };
+  }
+  return { errorKind: 'unknown' };
+}
+
 export async function consumeFeedItems(items: FeedRecord[], options: FeedConsumeOptions = {}): Promise<FeedConsumeResult> {
   const startedAt = new Date().toISOString();
   const runId = `run-${startedAt.replace(/[-:.TZ]/g, '').slice(0, 14)}`;
@@ -163,6 +175,7 @@ export async function consumeFeedItems(items: FeedRecord[], options: FeedConsume
   let bookmarked = 0;
   let skipped = 0;
   let failed = 0;
+  let actionRetries = 0;
   const pendingLikes: LikeRecord[] = [];
   const pendingBookmarks: BookmarkRecord[] = [];
 
@@ -210,21 +223,27 @@ export async function consumeFeedItems(items: FeedRecord[], options: FeedConsume
       let likeAction: FeedAgentLogEntry['actions']['like'] = alreadyLiked ? 'already-done' : 'skipped';
       let bookmarkAction: FeedAgentLogEntry['actions']['bookmark'] = alreadyBookmarked ? 'already-done' : 'skipped';
       let errorMessage: string | undefined;
+      const actionDetails: NonNullable<FeedAgentLogEntry['actionDetails']> = {};
 
       if (wantLike) {
         if (dryRun) {
           likeAction = 'planned';
         } else {
           try {
-            await likeTweet(key, options);
+            const result = await likeTweet(key, options);
             pendingLikes.push(toLikeRecord(item, timestamp));
             itemState.likedAt = timestamp;
             likeSet.add(key);
             likeAction = 'applied';
+            actionDetails.like = { attempts: result.attempts };
+            actionRetries += Math.max(0, result.attempts - 1);
             liked += 1;
           } catch (error) {
             likeAction = 'failed';
             errorMessage = (error as Error).message;
+            actionDetails.like = actionErrorDetail(error);
+            const likeAttempts = actionDetails.like?.attempts ?? 1;
+            actionRetries += Math.max(0, likeAttempts - 1);
             failed += 1;
           }
         }
@@ -235,15 +254,19 @@ export async function consumeFeedItems(items: FeedRecord[], options: FeedConsume
           bookmarkAction = 'planned';
         } else {
           try {
-            await bookmarkTweet(key, options);
+            const result = await bookmarkTweet(key, options);
             pendingBookmarks.push(toBookmarkRecord(item, timestamp));
             itemState.bookmarkedAt = timestamp;
             bookmarkSet.add(key);
             bookmarkAction = 'applied';
+            actionDetails.bookmark = { attempts: result.attempts };
+            actionRetries += Math.max(0, result.attempts - 1);
             bookmarked += 1;
           } catch (error) {
             bookmarkAction = 'failed';
             errorMessage = errorMessage ?? (error as Error).message;
+            actionDetails.bookmark = actionErrorDetail(error);
+            actionRetries += Math.max(0, (actionDetails.bookmark?.attempts ?? 1) - 1);
             failed += 1;
           }
         }
@@ -280,6 +303,7 @@ export async function consumeFeedItems(items: FeedRecord[], options: FeedConsume
           like: likeAction,
           bookmark: bookmarkAction,
         },
+        actionDetails: Object.keys(actionDetails).length > 0 ? actionDetails : undefined,
         reasons: [...decision.like.reasons, ...decision.bookmark.reasons],
         error: errorMessage,
       });
@@ -310,6 +334,7 @@ export async function consumeFeedItems(items: FeedRecord[], options: FeedConsume
     bookmarked,
     skipped,
     failed,
+    actionRetries,
     statePath: twitterFeedAgentStatePath(),
     logPath: twitterFeedAgentLogPath(),
   };

@@ -44,4 +44,51 @@ export interface ApiHybridSummaryResponse {
   summary: string;
 }
 
+export interface ApiFeedMetricWindow {
+  attempts: number;
+  successes: number;
+  failures: number;
+  successRate: number;
+}
+
+export interface ApiFeedMetricDay {
+  date: string;
+  attempts: number;
+  successes: number;
+  failures: number;
+  successRate: number;
+}
+
+export interface ApiFeedActionDay {
+  date: string;
+  likes: number;
+  bookmarks: number;
+}
+
+export interface ApiFeedMetricsResponse {
+  generatedAt: string;
+  feedCollection: {
+    windows: {
+      last24h: ApiFeedMetricWindow;
+      last7d: ApiFeedMetricWindow;
+    };
+    daily: ApiFeedMetricDay[];
+    lastOutcome: {
+      timestamp: string;
+      outcome: 'success' | 'error';
+      kind?: string;
+      summary?: string;
+    } | null;
+  };
+  actions: {
+    totals: {
+      likes: number;
+      bookmarks: number;
+    };
+    daily: ApiFeedActionDay[];
+    latestLikeAt: string | null;
+    latestBookmarkAt: string | null;
+  };
+}
+
 export type { HybridSearchMode, HybridSearchResult, HybridSearchScope, HybridSearchSource };

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { saveTwitterOAuthToken } from '../src/xauth.js';
+import { buildTwitterOAuthUrl, saveTwitterOAuthToken } from '../src/xauth.js';
 
 test('saveTwitterOAuthToken: writes private token file on posix', async () => {
   if (process.platform === 'win32') return;
@@ -27,5 +27,26 @@ test('saveTwitterOAuthToken: writes private token file on posix', async () => {
   } finally {
     process.env.FT_DATA_DIR = origEnv;
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('buildTwitterOAuthUrl requests bookmark.write scope', () => {
+  process.env.X_API_KEY = 'key';
+  process.env.X_API_SECRET = 'secret';
+  process.env.X_CLIENT_ID = 'client-id';
+  process.env.X_CLIENT_SECRET = 'client-secret';
+  process.env.X_CALLBACK_URL = 'http://127.0.0.1:3000/callback';
+
+  try {
+    const { url } = buildTwitterOAuthUrl();
+    const parsed = new URL(url);
+    const scope = parsed.searchParams.get('scope') ?? '';
+    assert.match(scope, /\bbookmark\.write\b/);
+  } finally {
+    delete process.env.X_API_KEY;
+    delete process.env.X_API_SECRET;
+    delete process.env.X_CLIENT_ID;
+    delete process.env.X_CLIENT_SECRET;
+    delete process.env.X_CALLBACK_URL;
   }
 });

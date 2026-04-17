@@ -28,7 +28,7 @@ export function buildTwitterOAuthUrl(): { url: string; state: string; verifier: 
   url.searchParams.set('response_type', 'code');
   url.searchParams.set('client_id', cfg.clientId);
   url.searchParams.set('redirect_uri', cfg.callbackUrl);
-  url.searchParams.set('scope', 'tweet.read users.read bookmark.read offline.access');
+  url.searchParams.set('scope', 'tweet.read users.read bookmark.read bookmark.write offline.access');
   url.searchParams.set('state', state);
   url.searchParams.set('code_challenge', challenge);
   url.searchParams.set('code_challenge_method', 'S256');

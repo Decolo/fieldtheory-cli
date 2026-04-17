@@ -1,9 +1,10 @@
 import { startTransition, useEffect, useState } from 'react';
-import { fetchArchiveItem, fetchArchiveList, fetchHybridSearch, fetchStatus } from './api';
+import { fetchArchiveItem, fetchArchiveList, fetchFeedMetrics, fetchHybridSearch, fetchStatus } from './api';
 import { ArchiveLayout } from './components/archive-layout';
 import type {
   ArchiveSource,
   BookmarkItem,
+  FeedMetricsResponse,
   HybridSearchMode,
   HybridSearchResult,
   LikeItem,
@@ -12,10 +13,11 @@ import type {
 } from './types';
 
 export function App() {
-  const [source, setSource] = useState<ViewSource>('search');
+  const [source, setSource] = useState<ViewSource>('dashboard');
   const [archiveSource, setArchiveSource] = useState<ArchiveSource>('bookmarks');
   const [searchMode, setSearchMode] = useState<HybridSearchMode>('topic');
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [metrics, setMetrics] = useState<FeedMetricsResponse | null>(null);
   const [items, setItems] = useState<Array<BookmarkItem | LikeItem | HybridSearchResult>>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedItem, setSelectedItem] = useState<BookmarkItem | LikeItem | HybridSearchResult | null>(null);
@@ -25,12 +27,43 @@ export function App() {
   const [listLoading, setListLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [metricsLoading, setMetricsLoading] = useState(true);
+  const [metricsError, setMetricsError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchStatus().then(setStatus).catch(() => null);
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    setMetricsLoading(true);
+    setMetricsError(null);
+
+    fetchFeedMetrics()
+      .then((response) => {
+        if (!cancelled) setMetrics(response);
+      })
+      .catch((error: Error) => {
+        if (!cancelled) setMetricsError(error.message);
+      })
+      .finally(() => {
+        if (!cancelled) setMetricsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (source === 'dashboard') {
+      setListLoading(false);
+      setItems([]);
+      setSelectedId(null);
+      setSelectedItem(null);
+      return;
+    }
+
     let cancelled = false;
     setListLoading(true);
     setDetailError(null);
@@ -106,12 +139,15 @@ export function App() {
       archiveSource={archiveSource}
       searchMode={searchMode}
       status={status}
+      metrics={metrics}
       items={items}
       selectedId={selectedId}
       selectedItem={selectedItem}
       listLoading={listLoading}
       detailLoading={detailLoading}
       detailError={detailError}
+      metricsLoading={metricsLoading}
+      metricsError={metricsError}
       summary={searchSummary}
       query={queryInput}
       onQueryChange={setQueryInput}

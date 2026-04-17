@@ -29,6 +29,9 @@ function renderDateLabel(source: ViewSource, item: BookmarkItem | LikeItem | Hyb
     const result = item;
     return `Sources ${result.sources.join(' + ')} · posted ${result.postedAt?.slice(0, 10) ?? '?'}`;
   }
+  if (source === 'dashboard') {
+    return 'Operational metrics dashboard';
+  }
   if (source === 'bookmarks' && isBookmarkItem(item)) {
     const bookmark = item;
     return `Bookmarked ${bookmark.bookmarkedAt?.slice(0, 10) ?? '?'} · posted ${bookmark.postedAt?.slice(0, 10) ?? '?'}`;

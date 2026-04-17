@@ -84,10 +84,16 @@ const FEED = [
   },
 ];
 
-async function withAgentData(fn: (dir: string, origin: string, requests: string[]) => Promise<void>): Promise<void> {
+async function withAgentData(
+  fn: (dir: string, origin: string, requests: string[]) => Promise<void>,
+  options: { favoriteStatuses?: number[]; bookmarkStatuses?: number[] } = {},
+): Promise<void> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-feed-agent-'));
   process.env.FT_DATA_DIR = dir;
+  process.env.FT_X_CLIENT_TRANSACTION_ID = 'test-transaction-id';
   const requests: string[] = [];
+  const favoriteStatuses = [...(options.favoriteStatuses ?? [])];
+  const bookmarkStatuses = [...(options.bookmarkStatuses ?? [])];
 
   const server = http.createServer(async (req, res) => {
     const body = await new Promise<string>((resolve) => {
@@ -118,15 +124,17 @@ async function withAgentData(fn: (dir: string, origin: string, requests: string[
 
     if (req.url?.includes('/FavoriteTweet')) {
       assert.equal(['fd-1', 'fd-3'].includes(parsed.variables?.tweet_id), true);
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ data: { favorite_tweet: 'Done' } }));
+      const status = favoriteStatuses.shift() ?? 200;
+      res.writeHead(status, { 'content-type': status === 200 ? 'application/json' : 'text/plain' });
+      res.end(status === 200 ? JSON.stringify({ data: { favorite_tweet: 'Done' } }) : 'temporary like failure');
       return;
     }
 
     if (req.url?.includes('/CreateBookmark')) {
       assert.equal(['fd-1', 'fd-3'].includes(parsed.variables?.tweet_id), true);
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ data: { tweet_bookmark_put: 'Done' } }));
+      const status = bookmarkStatuses.shift() ?? 200;
+      res.writeHead(status, { 'content-type': status === 200 ? 'application/json' : 'text/plain' });
+      res.end(status === 200 ? JSON.stringify({ data: { tweet_bookmark_put: 'Done' } }) : 'temporary bookmark failure');
       return;
     }
 
@@ -150,6 +158,7 @@ async function withAgentData(fn: (dir: string, origin: string, requests: string[
     await fn(dir, `http://127.0.0.1:${address.port}`, requests);
   } finally {
     delete process.env.FT_DATA_DIR;
+    delete process.env.FT_X_CLIENT_TRANSACTION_ID;
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     await rm(dir, { recursive: true, force: true });
   }
@@ -300,4 +309,32 @@ test('runFeedConsumer logs semantic errors per item instead of aborting the run'
     assert.equal(logs.every((entry) => entry.decision === 'error'), true);
     assert.equal(logs.every((entry) => /Semantic vector missing/.test(entry.error ?? '')), true);
   });
+});
+
+test('runFeedConsumer records retry metadata when an action succeeds after a transient failure', async () => {
+  await withAgentData(async (_dir, origin, requests) => {
+    process.env.FT_X_API_ORIGIN = origin;
+    process.env.FT_EMBEDDING_API_KEY = 'test-key';
+    process.env.FT_EMBEDDING_BASE_URL = origin;
+    try {
+      const result = await runFeedConsumer([FEED[0]!], {
+        candidateLimit: 1,
+        csrfToken: 'ct0-token',
+        cookieHeader: 'ct0=ct0-token; auth_token=auth',
+      });
+
+      assert.equal(result.liked, 1);
+      assert.equal(result.bookmarked, 1);
+      assert.equal(result.actionRetries, 1);
+      assert.equal(requests.filter((url) => url.includes('/FavoriteTweet')).length, 2);
+
+      const logs = await listFeedAgentLog(5);
+      assert.equal(logs[0]?.actionDetails?.like?.attempts, 2);
+      assert.equal(logs[0]?.actions.like, 'applied');
+    } finally {
+      delete process.env.FT_X_API_ORIGIN;
+      delete process.env.FT_EMBEDDING_API_KEY;
+      delete process.env.FT_EMBEDDING_BASE_URL;
+    }
+  }, { favoriteStatuses: [500, 200] });
 });
