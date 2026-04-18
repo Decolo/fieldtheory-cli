@@ -119,6 +119,92 @@ export interface FeedCacheMeta {
   totalSkippedEntries: number;
 }
 
+export interface AccountTimelineRecord {
+  id: string;
+  tweetId: string;
+  targetUserId: string;
+  targetHandle: string;
+  targetName?: string;
+  authorHandle?: string;
+  authorName?: string;
+  authorProfileImageUrl?: string;
+  author?: BookmarkAuthorSnapshot;
+  url: string;
+  text: string;
+  postedAt?: string | null;
+  syncedAt: string;
+  conversationId?: string;
+  inReplyToStatusId?: string;
+  inReplyToUserId?: string;
+  quotedStatusId?: string;
+  quotedTweet?: QuotedTweetSnapshot;
+  language?: string;
+  sourceApp?: string;
+  possiblySensitive?: boolean;
+  engagement?: BookmarkEngagementSnapshot;
+  media?: string[];
+  mediaObjects?: BookmarkMediaObject[];
+  links?: string[];
+  tags?: string[];
+  ingestedVia?: 'graphql';
+}
+
+export interface AccountRegistryEntry {
+  userId: string;
+  currentHandle: string;
+  handles: string[];
+  name?: string;
+  lastSyncedAt?: string;
+}
+
+export interface AccountRegistry {
+  schemaVersion: number;
+  byHandle: Record<string, string>;
+  byUserId: Record<string, AccountRegistryEntry>;
+}
+
+export interface AccountTimelineCacheMeta {
+  provider: 'twitter';
+  schemaVersion: number;
+  targetUserId: string;
+  targetHandle: string;
+  targetName?: string;
+  lastSyncAt?: string;
+  retention: string;
+  totalItems: number;
+  latestTweetId?: string;
+  latestTweetPostedAt?: string | null;
+  latestChanged?: boolean;
+}
+
+export interface AccountTimelineState {
+  provider: 'twitter';
+  schemaVersion: number;
+  targetUserId: string;
+  targetHandle: string;
+  lastRunAt?: string;
+  totalRuns: number;
+  totalFetched: number;
+  totalStored: number;
+  totalAdded: number;
+  lastAdded: number;
+  lastPruned: number;
+  latestTweetId?: string;
+  latestTweetPostedAt?: string | null;
+  latestChanged?: boolean;
+  lastSeenIds: string[];
+  stopReason?: string;
+  lastCursor?: string;
+}
+
+export interface XOAuthTokenSet {
+  access_token: string;
+  refresh_token?: string;
+  expires_in?: number;
+  scope?: string;
+  token_type?: string;
+  obtained_at: string;
+}
 export interface BookmarkBackfillState {
   provider: 'twitter';
   lastRunAt?: string;

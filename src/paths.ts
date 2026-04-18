@@ -120,6 +120,34 @@ export function twitterSemanticMetaPath(): string {
   return path.join(dataDir(), 'semantic-meta.json');
 }
 
+export function twitterAccountsRootDir(): string {
+  return path.join(dataDir(), 'accounts');
+}
+
+export function twitterAccountsRegistryPath(): string {
+  return path.join(dataDir(), 'accounts-registry.json');
+}
+
+export function twitterAccountDir(userId: string): string {
+  return path.join(twitterAccountsRootDir(), String(userId));
+}
+
+export function twitterAccountTimelineCachePath(userId: string): string {
+  return path.join(twitterAccountDir(userId), 'timeline.jsonl');
+}
+
+export function twitterAccountTimelineMetaPath(userId: string): string {
+  return path.join(twitterAccountDir(userId), 'timeline-meta.json');
+}
+
+export function twitterAccountTimelineStatePath(userId: string): string {
+  return path.join(twitterAccountDir(userId), 'timeline-state.json');
+}
+
+export function twitterAccountTimelineIndexPath(userId: string): string {
+  return path.join(twitterAccountDir(userId), 'timeline.db');
+}
+
 export function preferencesPath(): string {
   return path.join(dataDir(), '.preferences');
 }

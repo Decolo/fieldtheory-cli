@@ -14,3 +14,4 @@
 - [Scheduled autonomous feed actions plan](plans/2026-04-15-006-feat-feed-autonomous-actions-plan.md)
 - [Feed daemon and preference model v2 plan](plans/2026-04-15-007-feat-feed-daemon-preference-v2-plan.md)
 - [Feed semantic vector retrieval plan](plans/2026-04-15-008-feat-feed-semantic-vector-retrieval-plan.md)
+- [Single-account public timeline sync plan](plans/2026-04-18-009-feat-account-timeline-sync-plan.md)

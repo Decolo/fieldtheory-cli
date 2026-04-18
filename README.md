@@ -1,6 +1,6 @@
 # Field Theory CLI
 
-Sync and store locally your X/Twitter bookmarks, likes, and Home timeline feed items. Search them, classify bookmarks, and make them available to Claude Code, Codex, or any agent with shell access.
+Sync and store locally your X/Twitter bookmarks, likes, Home timeline feed items, and tracked public account timelines. Search bookmarks and likes, browse local timelines, classify bookmarks, and make them available to Claude Code, Codex, or any agent with shell access.
 
 Free and open source. Designed for Mac.
 
@@ -31,23 +31,26 @@ ft likes sync
 # 3. Fetch your Home timeline into a local read-only feed archive
 ft feed sync --max-pages 2
 
-# 4. Search them
+# 4. Sync one public account into its own separate archive
+ft accounts sync @elonmusk --limit 50 --retain 90d
+
+# 5. Search bookmarks, likes, and feed
 ft bookmarks search "distributed systems"
 ft likes search "distributed systems"
 ft search-all "best practices on claude code"
 ft search-all "claude code" --mode action
 
-# 5. Trim old likes in throttled batches
+# 6. Trim old likes in throttled batches
 ft likes trim --keep 200 --batch-size 25 --pause-seconds 45
 
-# 6. Run the autonomous feed agent once, or start the recurring daemon
+# 7. Run the autonomous feed agent once, or start the recurring daemon
 ft feed agent run --max-pages 1
 ft feed daemon start --every 30m --candidate-limit 30 --max-pages 2
 ft feed semantic status
 ft feed prefs like author @alice
 ft feed prefs bookmark topic "ai agents"
 
-# 7. Explore bookmarks
+# 8. Explore bookmarks
 ft bookmarks viz
 ft web
 ft bookmarks categories
@@ -67,6 +70,7 @@ On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse you
 | `ft bookmarks repair` | Repair missing quoted tweets, truncated text, and invalid bookmark dates |
 | `ft bookmarks sync --classify` | Sync then classify new bookmarks with LLM |
 | `ft likes sync` | Download and sync liked posts into a separate local archive |
+| `ft accounts sync <handle>` | Download one public account timeline into a separate local archive |
 | `ft feed sync` | Fetch Home timeline tweets into a local read-only feed archive |
 | `ft feed agent run` | Sync a bounded amount of feed data, score candidates, and auto-like/bookmark matches once |
 | `ft feed daemon start --every <interval>` | Run recurring feed refresh plus immediate consumption on one timer |
@@ -98,6 +102,9 @@ On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse you
 | `ft likes unlike <id>` | Unlike a post on X and update the local likes archive |
 | `ft likes trim` | Keep only the latest likes and unlike older posts on X in throttled batches |
 | `ft likes status` | Show likes archive status |
+| `ft accounts status <handle>` | Show one tracked account archive status |
+| `ft accounts list <handle>` | Browse cached tweets for one tracked account |
+| `ft accounts show <handle> <id>` | Show one cached tracked-account tweet in detail |
 | `ft feed list` | Browse cached Home timeline tweets with local paging |
 | `ft feed show <id>` | Show one cached feed item in detail |
 | `ft feed status` | Show feed archive status |
@@ -179,9 +186,14 @@ Works with Claude Code, Codex, or any agent with shell access.
 # Refresh feed and auto-like/bookmark matching items every 30 minutes via cron
 */30 * * * * ft feed agent run --max-pages 1
 
+# Refresh one tracked public account every 20 minutes and keep only the last 30 days locally
+*/20 * * * * ft accounts sync @elonmusk --limit 50 --retain 30d
+
 # Or keep one daemon process alive
 ft feed daemon start --every 30m --candidate-limit 30 --max-pages 2
 ```
+
+`ft accounts sync` is explicit per account in v1. It stores data under a separate `accounts/<user-id>/` archive, prunes rows older than the `--retain` window during sync, and does not add tracked-account tweets into `ft search-all` yet.
 
 ## Data
 
@@ -197,6 +209,13 @@ All data is stored locally at `~/.ft-bookmarks/`:
   likes.db                # SQLite FTS5 search index for likes
   likes-meta.json         # likes sync metadata
   likes-backfill-state.json
+  accounts-registry.json   # local handle -> user-id registry for tracked accounts
+  accounts/
+    44196397/
+      timeline.jsonl       # raw tracked-account timeline cache
+      timeline.db          # SQLite index for one account timeline
+      timeline-meta.json   # last sync summary, retention, latest tweet snapshot
+      timeline-state.json  # sync checkpoint state for one account
   feed.jsonl              # raw Home timeline cache (tweet-only entries)
   feed.db                 # SQLite index for local feed browsing
   feed-meta.json          # feed sync metadata
