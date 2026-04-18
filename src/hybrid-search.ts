@@ -1,6 +1,6 @@
-import { searchBookmarks } from './bookmarks-db.js';
-import { searchLikes } from './likes-db.js';
-import { searchFeed } from './feed-db.js';
+import { openDb } from './db.js';
+import { twitterArchiveIndexPath } from './paths.js';
+import { rebuildArchiveStoreFromCaches } from './archive-store.js';
 import type {
   HybridSearchMode,
   HybridSearchResponse,
@@ -15,6 +15,18 @@ interface HybridSearchOptions {
   scope?: HybridSearchScope;
   limit?: number;
   summary?: boolean;
+}
+
+interface ArchiveCandidateRow {
+  id: string;
+  tweetId: string;
+  url: string;
+  text: string;
+  authorHandle?: string;
+  authorName?: string;
+  postedAt?: string | null;
+  sources: HybridSearchSource[];
+  score: number;
 }
 
 interface CandidateAccumulator {
@@ -59,44 +71,161 @@ function buildLocalProbes(query: string): string[] {
   return Array.from(probes).filter(Boolean);
 }
 
+function parseSources(value: unknown): HybridSearchSource[] {
+  if (typeof value !== 'string' || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((entry): HybridSearchSource[] => {
+      if (entry === 'bookmark') return ['bookmarks'];
+      if (entry === 'like') return ['likes'];
+      if (entry === 'feed') return ['feed'];
+      if (entry === 'bookmarks' || entry === 'likes') return [entry];
+      return [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function singularSource(scope: Exclude<HybridSearchScope, 'all'>): 'bookmark' | 'like' | 'feed' {
+  if (scope === 'bookmarks') return 'bookmark';
+  if (scope === 'likes') return 'like';
+  return 'feed';
+}
+
+async function ensureArchiveIndex(): Promise<void> {
+  await rebuildArchiveStoreFromCaches({ buildIndex: true });
+}
+
+function normalizeSourceDates(row: unknown[]): Partial<Record<HybridSearchSource, string | null>> {
+  return {
+    bookmarks: (row[8] as string) ?? null,
+    likes: (row[9] as string) ?? null,
+    feed: (row[10] as string) ?? null,
+  };
+}
+
+async function searchArchiveCandidates(
+  probe: string,
+  scope: HybridSearchScope,
+  limit: number,
+): Promise<Array<ArchiveCandidateRow & { sourceDates: Partial<Record<HybridSearchSource, string | null>> }>> {
+  const db = await openDb(twitterArchiveIndexPath());
+  const params: Array<string | number> = [probe];
+  const conditions = ['ai.rowid IN (SELECT rowid FROM archive_items_fts WHERE archive_items_fts MATCH ?)'];
+
+  if (scope !== 'all') {
+    conditions.push(`EXISTS (
+      SELECT 1
+      FROM archive_sources src_filter
+      WHERE src_filter.tweet_id = ai.tweet_id
+        AND src_filter.source = ?
+    )`);
+    params.push(singularSource(scope));
+  }
+
+  try {
+    let rows;
+    try {
+      rows = db.exec(
+        `
+          SELECT
+            ai.id,
+            ai.tweet_id,
+            ai.url,
+            ai.text,
+            ai.author_handle,
+            ai.author_name,
+            ai.posted_at,
+            ai.sources_json,
+            (
+              SELECT MAX(src_bookmark.source_timestamp)
+              FROM archive_sources src_bookmark
+              WHERE src_bookmark.tweet_id = ai.tweet_id
+                AND src_bookmark.source = 'bookmark'
+            ) AS bookmark_timestamp,
+            (
+              SELECT MAX(src_like.source_timestamp)
+              FROM archive_sources src_like
+              WHERE src_like.tweet_id = ai.tweet_id
+                AND src_like.source = 'like'
+            ) AS like_timestamp,
+            (
+              SELECT MAX(COALESCE(src_feed.source_timestamp, src_feed.synced_at))
+              FROM archive_sources src_feed
+              WHERE src_feed.tweet_id = ai.tweet_id
+                AND src_feed.source = 'feed'
+            ) AS feed_timestamp,
+            bm25(archive_items_fts, 5.0, 2.0, 1.0, 1.0) AS score
+          FROM archive_items ai
+          JOIN archive_items_fts ON archive_items_fts.rowid = ai.rowid
+          WHERE ${conditions.join(' AND ')}
+          ORDER BY bm25(archive_items_fts, 5.0, 2.0, 1.0, 1.0) ASC
+          LIMIT ?
+        `,
+        [...params, limit],
+      );
+    } catch (error) {
+      const message = (error as Error).message ?? '';
+      if (message.includes('fts5') || message.includes('MATCH') || message.includes('syntax')) {
+        throw new Error(`Invalid search query: "${probe}". Try simpler terms or wrap phrases in double quotes.`);
+      }
+      throw error;
+    }
+
+    return (rows[0]?.values ?? []).map((row) => ({
+      id: String(row[0]),
+      tweetId: String(row[1]),
+      url: String(row[2]),
+      text: String(row[3] ?? ''),
+      authorHandle: (row[4] as string) ?? undefined,
+      authorName: (row[5] as string) ?? undefined,
+      postedAt: (row[6] as string) ?? null,
+      sources: parseSources(row[7]),
+      sourceDates: normalizeSourceDates(row),
+      score: Number(row[11] ?? 0),
+    }));
+  } finally {
+    db.close();
+  }
+}
+
 function registerCandidate(
   accumulator: Map<string, CandidateAccumulator>,
-  input: {
-    id: string;
-    tweetId?: string;
-    url: string;
-    text: string;
-    authorHandle?: string;
-    authorName?: string;
-    postedAt?: string | null;
-    source: HybridSearchSource;
+  input: ArchiveCandidateRow & {
+    sourceDates: Partial<Record<HybridSearchSource, string | null>>;
     probe: string;
-    rank: number;
   },
 ): void {
-  const key = input.tweetId ?? input.id;
-  const existing = accumulator.get(key);
-  const lexicalContribution = 1 / (input.rank + 1);
+  const existing = accumulator.get(input.tweetId);
+  const lexicalContribution = input.score <= 0
+    ? 1 + Math.abs(input.score)
+    : 1 / (input.score + 1);
 
   if (!existing) {
-    accumulator.set(key, {
+    accumulator.set(input.tweetId, {
       id: input.id,
-      tweetId: input.tweetId ?? input.id,
+      tweetId: input.tweetId,
       url: input.url,
       text: input.text,
       authorHandle: input.authorHandle,
       authorName: input.authorName,
       postedAt: input.postedAt ?? null,
-      sources: new Set([input.source]),
-      sourceDates: { [input.source]: input.postedAt ?? null },
+      sources: new Set(input.sources),
+      sourceDates: { ...input.sourceDates },
       matchedQueries: new Set([input.probe]),
       lexicalScore: lexicalContribution,
     });
     return;
   }
 
-  existing.sources.add(input.source);
-  existing.sourceDates[input.source] = input.postedAt ?? null;
+  input.sources.forEach((source) => existing.sources.add(source));
+  for (const source of SOURCE_PRIORITY) {
+    if (input.sourceDates[source] !== undefined) {
+      existing.sourceDates[source] = input.sourceDates[source];
+    }
+  }
   existing.matchedQueries.add(input.probe);
   existing.lexicalScore += lexicalContribution;
 
@@ -105,9 +234,14 @@ function registerCandidate(
   if (!existing.postedAt && input.postedAt) existing.postedAt = input.postedAt;
 }
 
-function choosePrimarySource(sources: Set<HybridSearchSource>): HybridSearchSource {
+function choosePrimarySource(
+  sources: Iterable<HybridSearchSource>,
+  preferred?: HybridSearchScope,
+): HybridSearchSource {
+  const available = new Set(sources);
+  if (preferred && preferred !== 'all' && available.has(preferred)) return preferred;
   for (const source of SOURCE_PRIORITY) {
-    if (sources.has(source)) return source;
+    if (available.has(source)) return source;
   }
   return 'feed';
 }
@@ -167,45 +301,17 @@ export async function runHybridSearch(options: HybridSearchOptions): Promise<Hyb
     };
   }
 
+  await ensureArchiveIndex();
   const probes = buildLocalProbes(query).slice(0, 8);
-
   const candidateMap = new Map<string, CandidateAccumulator>();
-  const allowSource = (source: HybridSearchSource): boolean => scope === 'all' || scope === source;
 
   for (const probe of probes) {
     if (!probe) continue;
-
-    if (allowSource('bookmarks')) {
-      const results = await searchBookmarks({ query: probe, limit: perProbeLimit });
-      results.forEach((result, index) => registerCandidate(candidateMap, {
-        ...result,
-        tweetId: result.id,
-        source: 'bookmarks',
-        probe,
-        rank: index,
-      }));
-    }
-
-    if (allowSource('likes')) {
-      const results = await searchLikes({ query: probe, limit: perProbeLimit });
-      results.forEach((result, index) => registerCandidate(candidateMap, {
-        ...result,
-        tweetId: result.id,
-        source: 'likes',
-        probe,
-        rank: index,
-      }));
-    }
-
-    if (allowSource('feed')) {
-      const results = await searchFeed(probe, perProbeLimit);
-      results.forEach((result, index) => registerCandidate(candidateMap, {
-        ...result,
-        source: 'feed',
-        probe,
-        rank: index,
-      }));
-    }
+    const results = await searchArchiveCandidates(probe, scope, perProbeLimit);
+    results.forEach((result) => registerCandidate(candidateMap, {
+      ...result,
+      probe,
+    }));
   }
 
   const preferredAuthors = new Set<string>();
@@ -216,7 +322,7 @@ export async function runHybridSearch(options: HybridSearchOptions): Promise<Hyb
   }
 
   const ranked = Array.from(candidateMap.values()).map<HybridSearchResult>((candidate) => {
-    const sources = Array.from(candidate.sources);
+    const sources = SOURCE_PRIORITY.filter((source) => candidate.sources.has(source));
     const isBookmarked = candidate.sources.has('bookmarks');
     const isLiked = candidate.sources.has('likes');
     const isInFeed = candidate.sources.has('feed');
@@ -240,8 +346,8 @@ export async function runHybridSearch(options: HybridSearchOptions): Promise<Hyb
       text: candidate.text,
       authorHandle: candidate.authorHandle,
       authorName: candidate.authorName,
-      postedAt: candidate.postedAt,
-      source: choosePrimarySource(candidate.sources),
+      postedAt: candidate.postedAt ?? null,
+      source: choosePrimarySource(sources, scope),
       sources,
       score: mode === 'action' ? actionScore : topicScore,
       topicScore,
@@ -251,16 +357,17 @@ export async function runHybridSearch(options: HybridSearchOptions): Promise<Hyb
       isBookmarked,
       isLiked,
       isInFeed,
+      sourceCount: sources.length,
     };
   });
 
-  ranked.sort((left, right) => {
-    if (right.score !== left.score) return right.score - left.score;
-    return (right.postedAt ?? '').localeCompare(left.postedAt ?? '');
+  ranked.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if ((b.postedAt ?? '') !== (a.postedAt ?? '')) return (b.postedAt ?? '').localeCompare(a.postedAt ?? '');
+    return a.url.localeCompare(b.url);
   });
 
   const results = ranked.slice(0, limit);
-  const summary = options.summary ? await summarizeResults(query, mode, results) : undefined;
 
   return {
     query,
@@ -269,6 +376,6 @@ export async function runHybridSearch(options: HybridSearchOptions): Promise<Hyb
     usedEngine: false,
     expansions: [],
     results,
-    summary,
+    summary: options.summary ? await summarizeResults(query, mode, results) : undefined,
   };
 }

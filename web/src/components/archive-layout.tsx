@@ -1,11 +1,11 @@
 import type {
-  ArchiveSource,
+  ArchiveItem,
   BookmarkItem,
   FeedMetricsResponse,
   HybridSearchMode,
   HybridSearchResult,
-  LikeItem,
   StatusResponse,
+  ArchiveSource,
   ViewSource,
 } from '../types';
 import { DashboardPanel } from './dashboard-panel';
@@ -19,9 +19,9 @@ interface ArchiveLayoutProps {
   searchMode: HybridSearchMode;
   status: StatusResponse | null;
   metrics: FeedMetricsResponse | null;
-  items: Array<BookmarkItem | LikeItem | HybridSearchResult>;
+  items: Array<ArchiveItem | HybridSearchResult>;
   selectedId: string | null;
-  selectedItem: BookmarkItem | LikeItem | HybridSearchResult | null;
+  selectedItem: ArchiveItem | HybridSearchResult | null;
   listLoading: boolean;
   detailLoading: boolean;
   detailError: string | null;
@@ -48,7 +48,9 @@ export function ArchiveLayout(props: ArchiveLayoutProps) {
       ? props.metrics?.feedCollection.windows.last7d.attempts
     : props.source === 'bookmarks'
       ? props.status?.bookmarks.total
-      : props.status?.likes.total;
+      : props.source === 'likes'
+        ? props.status?.likes.total
+        : props.status?.feed.total;
 
   return (
     <main className="app-shell">
@@ -85,7 +87,7 @@ export function ArchiveLayout(props: ArchiveLayoutProps) {
             >
               search
             </button>
-            {(['bookmarks', 'likes'] as const).map((source) => (
+            {(['bookmarks', 'likes', 'feed'] as const).map((source) => (
               <button
                 key={source}
                 type="button"

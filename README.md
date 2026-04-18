@@ -17,13 +17,13 @@ If you later publish this fork to npm, use:
 npm install -g fieldtheory-cli
 ```
 
-Requires Node.js 20+. Chrome recommended for session sync; OAuth available for bookmark sync on all platforms.
+Requires Node.js 20+. Chrome recommended for session sync.
 
 ## Quick start
 
 ```bash
 # 1. Sync your bookmarks (needs Chrome logged into X)
-ft sync
+ft bookmarks sync
 
 # 2. Sync your likes into a separate local archive
 ft likes sync
@@ -35,7 +35,7 @@ ft feed sync --max-pages 2
 ft accounts sync @elonmusk --limit 50 --retain 90d
 
 # 5. Search bookmarks, likes, and feed
-ft search "distributed systems"
+ft bookmarks search "distributed systems"
 ft likes search "distributed systems"
 ft search-all "best practices on claude code"
 ft search-all "claude code" --mode action
@@ -51,13 +51,13 @@ ft feed prefs like author @alice
 ft feed prefs bookmark topic "ai agents"
 
 # 8. Explore bookmarks
-ft viz
+ft bookmarks viz
 ft web
-ft categories
-ft stats
+ft bookmarks categories
+ft bookmarks stats
 ```
 
-On first run, `ft sync`, `ft likes sync`, and `ft feed sync` reuse your browser session from Chrome/Firefox and download data into `~/.ft-bookmarks/`.
+On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse your browser session from Chrome/Firefox and download data into `~/.ft-bookmarks/`.
 
 ## Commands
 
@@ -65,12 +65,10 @@ On first run, `ft sync`, `ft likes sync`, and `ft feed sync` reuse your browser 
 
 | Command | Description |
 |---------|-------------|
-| `ft sync` | Download and sync bookmarks (no API required) |
-| `ft sync --rebuild` | Full history re-crawl of bookmarks |
-| `ft sync --gaps` | Backfill missing quoted tweets and expand truncated articles |
-| `ft sync --classify` | Sync then classify new bookmarks with LLM |
-| `ft sync --api` | Sync via OAuth API (cross-platform) |
-| `ft auth` | Set up OAuth for API-based sync (optional) |
+| `ft bookmarks sync` | Download and sync bookmarks from the primary browser-session path |
+| `ft bookmarks sync --rebuild` | Full history re-crawl of bookmarks |
+| `ft bookmarks repair` | Repair missing quoted tweets, truncated text, and invalid bookmark dates |
+| `ft bookmarks sync --classify` | Sync then classify new bookmarks with LLM |
 | `ft likes sync` | Download and sync liked posts into a separate local archive |
 | `ft accounts sync <handle>` | Download one public account timeline into a separate local archive |
 | `ft feed sync` | Fetch Home timeline tweets into a local read-only feed archive |
@@ -92,11 +90,12 @@ On first run, `ft sync`, `ft likes sync`, and `ft feed sync` reuse your browser 
 
 | Command | Description |
 |---------|-------------|
-| `ft search <query>` | Full-text bookmark search with BM25 ranking |
+| `ft bookmarks search <query>` | Full-text bookmark search with BM25 ranking |
 | `ft search-all <query>` | Hybrid search across feed, likes, and bookmarks |
-| `ft list` | Filter by author, date, category, domain |
-| `ft show <id>` | Show one bookmark in detail |
-| `ft unbookmark <id>` | Remove a bookmark on X and update the local bookmark archive |
+| `ft bookmarks list` | Filter by author, date, category, domain |
+| `ft bookmarks show <id>` | Show one bookmark in detail |
+| `ft bookmarks add <id>` | Create one bookmark on X |
+| `ft bookmarks unbookmark <id>` | Remove a bookmark on X and update the local bookmark archive |
 | `ft likes search <query>` | Full-text search across liked posts |
 | `ft likes list` | Filter liked posts by query, author, and like date |
 | `ft likes show <id>` | Show one liked post in detail |
@@ -112,20 +111,20 @@ On first run, `ft sync`, `ft likes sync`, and `ft feed sync` reuse your browser 
 | `ft feed agent status` | Show cumulative autonomous-agent totals and local artifact paths |
 | `ft feed agent log` | Show recent autonomous likes, bookmarks, and skips |
 | `ft web` | Launch a local web UI for hybrid search plus archive browsing |
-| `ft sample <category>` | Random sample from a category |
-| `ft stats` | Top authors, languages, date range |
-| `ft viz` | Terminal dashboard with sparklines, categories, and domains |
-| `ft categories` | Show category distribution |
-| `ft domains` | Subject domain distribution |
+| `ft bookmarks sample <category>` | Random sample from a category |
+| `ft bookmarks stats` | Top authors, languages, date range |
+| `ft bookmarks viz` | Terminal dashboard with sparklines, categories, and domains |
+| `ft bookmarks categories` | Show category distribution |
+| `ft bookmarks domains` | Subject domain distribution |
 
 ### Classification
 
 | Command | Description |
 |---------|-------------|
-| `ft classify` | Classify by category and domain using LLM |
-| `ft classify --regex` | Classify by category using simple regex |
-| `ft classify-domains` | Classify by subject domain only (LLM) |
-| `ft model` | View or change the default LLM engine |
+| `ft bookmarks classify` | Classify by category and domain using LLM |
+| `ft bookmarks classify --regex` | Classify by category using simple regex |
+| `ft bookmarks classify-domains` | Classify by subject domain only (LLM) |
+| `ft bookmarks model` | View or change the default LLM engine |
 
 ### Knowledge base
 
@@ -150,10 +149,11 @@ On first run, `ft sync`, `ft likes sync`, and `ft feed sync` reuse your browser 
 
 | Command | Description |
 |---------|-------------|
-| `ft index` | Rebuild search index from JSONL cache (preserves classifications) |
+| `ft bookmarks index` | Rebuild search index from JSONL cache (preserves classifications) |
+| `ft bookmarks model` | View or change the default LLM engine for bookmark classification |
 | `ft likes index` | Rebuild the likes search index from the likes cache |
-| `ft fetch-media` | Download media assets (static images only) |
-| `ft status` | Show sync status and data location |
+| `ft bookmarks fetch-media` | Download media assets (static images only) |
+| `ft bookmarks status` | Show sync status and data location |
 | `ft path` | Print data directory path |
 
 ## Agent integration
@@ -178,10 +178,10 @@ Works with Claude Code, Codex, or any agent with shell access.
 
 ```bash
 # Sync every morning at 7am
-0 7 * * * ft sync
+0 7 * * * ft bookmarks sync
 
 # Sync and classify every morning
-0 7 * * * ft sync --classify
+0 7 * * * ft bookmarks sync --classify
 
 # Refresh feed and auto-like/bookmark matching items every 30 minutes via cron
 */30 * * * * ft feed agent run --max-pages 1
@@ -220,13 +220,14 @@ All data is stored locally at `~/.ft-bookmarks/`:
   feed.db                 # SQLite index for local feed browsing
   feed-meta.json          # feed sync metadata
   feed-state.json
+  archive.jsonl           # canonical unified archive cache with source attachments
+  archive.db              # unified archive index for web/search/assistant consumers
   feed-agent-state.json   # cumulative autonomous action state and idempotency
   feed-agent-log.jsonl    # append-only autonomous action log
   feed-daemon-state.json  # recurring daemon status and last tick summary
   feed-daemon.log         # append-only daemon loop log
   semantic.lance/         # local LanceDB vector store for semantic feed retrieval
   semantic-meta.json      # embedding provider/model and semantic coverage counts
-  oauth-token.json        # OAuth token (if using API mode, chmod 600)
   md/                     # markdown knowledge base (ft wiki / ft md)
 ```
 
@@ -364,18 +365,17 @@ The default web view is now search-first:
 | **opinion** | Takes, analysis, commentary, threads |
 | **commerce** | Products, shopping, physical goods |
 
-Use `ft classify` for LLM-powered classification that catches what regex misses.
+Use `ft bookmarks classify` for LLM-powered classification that catches what regex misses.
 
 ## Platform support
 
 | Feature | macOS | Linux | Windows |
 |---------|-------|-------|---------|
-| Session sync (`ft sync`, `ft likes sync`) | Chrome, Brave, Arc, Firefox | Firefox | Firefox |
-| OAuth API sync (`ft sync --api`) | Yes | Yes | Yes |
+| Session sync (`ft bookmarks sync`, `ft likes sync`) | Chrome, Brave, Arc, Firefox | Firefox | Firefox |
 | Search, list, likes archive | Yes | Yes | Yes |
 | Bookmark classify, viz, wiki | Yes | Yes | Yes |
 
-Session sync extracts cookies from your browser's local database. Use `ft sync --browser <name>` to pick a browser. On platforms where session sync isn't available, use `ft auth` + `ft sync --api`.
+Session sync extracts cookies from your browser's local database. Use `ft bookmarks sync --browser <name>` to pick a browser.
 
 ## Security
 
@@ -383,9 +383,7 @@ Session sync extracts cookies from your browser's local database. Use `ft sync -
 
 **Chrome session sync** reads cookies from Chrome's local database, uses them for the sync request, and discards them. Cookies are never stored separately.
 
-**OAuth tokens** are stored with `chmod 600` (owner-only). Treat `~/.ft-bookmarks/oauth-token.json` like a password.
-
-**The default bookmark sync uses X's internal GraphQL API**, the same API that x.com uses in your browser. For the official v2 API, use `ft auth` + `ft sync --api`.
+**The default bookmark sync uses X's internal GraphQL API**, the same API that x.com uses in your browser.
 
 **The likes archive sync also uses your browser-authenticated X web session.** In v1 it is browser-session based only; there is no OAuth likes sync path yet.
 

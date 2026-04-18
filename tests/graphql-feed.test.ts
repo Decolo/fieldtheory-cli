@@ -4,14 +4,17 @@ import os from 'node:os';
 import path from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 import {
+  convertHomeTimelineTweetToArchiveItem,
   convertHomeTimelineTweetToRecord,
+  emitFeedArchiveItem,
   parseHomeTimelineResponse,
   mergeFeedRecord,
   mergeFeedRecords,
   syncFeedGraphQL,
 } from '../src/graphql-feed.js';
-import type { FeedRecord } from '../src/types.js';
-import { readJson, readJsonLines } from '../src/fs.js';
+import { loadArchiveStore, rebuildArchiveStoreFromCaches } from '../src/archive-store.js';
+import { readJson, readJsonLines, writeJsonLines } from '../src/fs.js';
+import type { BookmarkRecord, FeedRecord, LikeRecord } from '../src/types.js';
 
 const NOW = '2026-04-12T14:00:00.000Z';
 
@@ -117,6 +120,34 @@ function makeRecord(overrides: Partial<FeedRecord> = {}): FeedRecord {
   };
 }
 
+function makeBookmarkRecord(overrides: Partial<BookmarkRecord> = {}): BookmarkRecord {
+  return {
+    id: 'bookmark-1',
+    tweetId: 'bookmark-1',
+    url: 'https://x.com/user/status/bookmark-1',
+    text: 'Bookmark text',
+    syncedAt: NOW,
+    bookmarkedAt: NOW,
+    tags: [],
+    ingestedVia: 'graphql',
+    ...overrides,
+  };
+}
+
+function makeLikeRecord(overrides: Partial<LikeRecord> = {}): LikeRecord {
+  return {
+    id: 'like-1',
+    tweetId: 'like-1',
+    url: 'https://x.com/user/status/like-1',
+    text: 'Like text',
+    syncedAt: NOW,
+    likedAt: NOW,
+    tags: [],
+    ingestedVia: 'graphql',
+    ...overrides,
+  };
+}
+
 test('convertHomeTimelineTweetToRecord builds a feed record with ordering fields', () => {
   const result = convertHomeTimelineTweetToRecord(makeTweetResult(), NOW, {
     sortIndex: '2043330774450569216',
@@ -130,6 +161,39 @@ test('convertHomeTimelineTweetToRecord builds a feed record with ordering fields
   assert.equal(result.fetchPage, 1);
   assert.equal(result.fetchPosition, 0);
   assert.equal(result.engagement?.viewCount, 1829);
+});
+
+test('convertHomeTimelineTweetToArchiveItem emits canonical feed attachment metadata', () => {
+  const result = convertHomeTimelineTweetToArchiveItem(makeTweetResult(), NOW, {
+    sortIndex: '2043330774450569216',
+    fetchPage: 1,
+    fetchPosition: 0,
+  });
+  assert.ok(result);
+  assert.equal(result?.id, '2043312514902171702');
+  assert.equal(result?.normalizedText, 'hello from the home timeline');
+  assert.equal(result?.sourceAttachments.feed?.source, 'feed');
+  assert.equal(result?.sourceAttachments.feed?.orderingKey, '2043330774450569216');
+  assert.equal(result?.sourceAttachments.feed?.fetchPage, 1);
+  assert.equal(result?.sourceAttachments.feed?.fetchPosition, 0);
+  assert.equal(result?.sourceAttachments.feed?.metadata?.sourceRecordId, '2043312514902171702');
+});
+
+test('emitFeedArchiveItem preserves feed ordering metadata', () => {
+  const item = emitFeedArchiveItem(makeRecord({
+    id: 'feed-row-1',
+    tweetId: '888',
+    text: 'feed text',
+    sortIndex: '222',
+    fetchPage: 3,
+    fetchPosition: 4,
+  }));
+
+  assert.equal(item.id, '888');
+  assert.equal(item.sourceAttachments.feed?.orderingKey, '222');
+  assert.equal(item.sourceAttachments.feed?.fetchPage, 3);
+  assert.equal(item.sourceAttachments.feed?.fetchPosition, 4);
+  assert.equal(item.sourceAttachments.feed?.metadata?.sourceRecordId, 'feed-row-1');
 });
 
 test('parseHomeTimelineResponse keeps tweet entries, skips promoted and non-tweet entries, and extracts cursor', () => {
@@ -240,6 +304,57 @@ test('syncFeedGraphQL writes cache, meta, state, and index from mocked Home time
     assert.equal(state.totalStored, 2);
   } finally {
     globalThis.fetch = originalFetch;
+    delete process.env.FT_DATA_DIR;
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('rebuildArchiveStoreFromCaches merges one tweet across feed, likes, and bookmarks attachments', async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'ft-unified-archive-ingest-'));
+  process.env.FT_DATA_DIR = tmpDir;
+
+  try {
+    const tweetId = 'shared-tweet';
+    await writeJsonLines(path.join(tmpDir, 'feed.jsonl'), [
+      makeRecord({
+        id: 'feed-row-1',
+        tweetId,
+        url: `https://x.com/user/status/${tweetId}`,
+        text: 'Shared tweet from feed',
+        sortIndex: '400',
+        fetchPage: 1,
+        fetchPosition: 0,
+      }),
+    ]);
+    await writeJsonLines(path.join(tmpDir, 'likes.jsonl'), [
+      makeLikeRecord({
+        id: 'like-row-1',
+        tweetId,
+        url: `https://x.com/user/status/${tweetId}`,
+        text: 'Shared tweet from feed',
+      }),
+    ]);
+    await writeJsonLines(path.join(tmpDir, 'bookmarks.jsonl'), [
+      makeBookmarkRecord({
+        id: 'bookmark-row-1',
+        tweetId,
+        url: `https://x.com/user/status/${tweetId}`,
+        text: 'Shared tweet from feed',
+      }),
+    ]);
+
+    const result = await rebuildArchiveStoreFromCaches({ forceIndex: true });
+    const archive = await loadArchiveStore();
+    const shared = archive.find((item) => item.tweetId === tweetId);
+
+    assert.equal(result.totalItems, 1);
+    assert.ok(shared);
+    assert.equal(shared?.id, tweetId);
+    assert.deepEqual(Object.keys(shared?.sourceAttachments ?? {}).sort(), ['bookmark', 'feed', 'like']);
+    assert.equal(shared?.sourceAttachments.feed?.metadata?.sourceRecordId, 'feed-row-1');
+    assert.equal(shared?.sourceAttachments.like?.metadata?.sourceRecordId, 'like-row-1');
+    assert.equal(shared?.sourceAttachments.bookmark?.metadata?.sourceRecordId, 'bookmark-row-1');
+  } finally {
     delete process.env.FT_DATA_DIR;
     await rm(tmpDir, { recursive: true, force: true });
   }

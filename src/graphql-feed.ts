@@ -1,7 +1,9 @@
+import { archiveItemFromFeedRecord } from './archive-core.js';
+import { rebuildArchiveStoreFromCaches } from './archive-store.js';
 import { pathExists, readJson, readJsonLines, writeJson, writeJsonLines } from './fs.js';
 import { ensureDataDir, twitterFeedCachePath, twitterFeedIndexPath, twitterFeedMetaPath, twitterFeedStatePath } from './paths.js';
 import { resolveXSessionAuth, buildGraphqlUrl, buildXGraphqlHeaders, fetchXResource, XRequestError, type XSessionOptions } from './x-graphql.js';
-import type { FeedBackfillState, FeedCacheMeta, FeedRecord } from './types.js';
+import type { ArchiveItem, FeedBackfillState, FeedCacheMeta, FeedRecord } from './types.js';
 import { buildFeedIndex } from './feed-db.js';
 
 const HOME_TIMELINE_QUERY_ID = 'Fb7fyZ9MMCzvf_bNtwNdXA';
@@ -51,6 +53,25 @@ interface FeedPageResult {
   nextCursor?: string;
   skippedEntries: number;
   seenTweetIds: string[];
+}
+
+function withFeedSourceRecordMetadata(item: ArchiveItem, sourceRecordId: string): ArchiveItem {
+  return {
+    ...item,
+    id: item.tweetId || item.id,
+    sourceAttachments: {
+      ...item.sourceAttachments,
+      feed: item.sourceAttachments.feed
+        ? {
+            ...item.sourceAttachments.feed,
+            metadata: {
+              ...(item.sourceAttachments.feed.metadata ?? {}),
+              sourceRecordId,
+            },
+          }
+        : undefined,
+    },
+  };
 }
 
 export interface FeedSyncOptions extends XSessionOptions {
@@ -322,6 +343,19 @@ export function convertHomeTimelineTweetToRecord(tweetResult: any, now: string, 
   };
 }
 
+export function emitFeedArchiveItem(record: FeedRecord): ArchiveItem {
+  return withFeedSourceRecordMetadata(archiveItemFromFeedRecord(record), record.id);
+}
+
+export function convertHomeTimelineTweetToArchiveItem(
+  tweetResult: any,
+  now: string,
+  ordering: { sortIndex?: string | null; fetchPage: number; fetchPosition: number },
+): ArchiveItem | null {
+  const record = convertHomeTimelineTweetToRecord(tweetResult, now, ordering);
+  return record ? emitFeedArchiveItem(record) : null;
+}
+
 export function parseHomeTimelineResponse(json: any, options: { now?: string; fetchPage?: number } = {}): FeedPageResult {
   const ts = options.now ?? new Date().toISOString();
   const fetchPage = options.fetchPage ?? 1;
@@ -539,6 +573,7 @@ export async function syncFeedGraphQL(options: FeedSyncOptions = {}): Promise<Fe
     lastRunAt: syncedAt,
   }));
   const indexResult = await buildFeedIndex({ force: true });
+  await rebuildArchiveStoreFromCaches({ forceIndex: true });
 
   options.onProgress?.({
     page,

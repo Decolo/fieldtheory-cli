@@ -1,4 +1,5 @@
 import { getTwitterFeedStatus, latestFeedSyncAt } from './feed.js';
+import { countFeed } from './feed-db.js';
 
 export interface FeedStatusView {
   itemCount: number;
@@ -10,8 +11,12 @@ export interface FeedStatusView {
 
 export async function getFeedStatusView(): Promise<FeedStatusView> {
   const status = await getTwitterFeedStatus();
+  let itemCount = status.totalItems;
+  try {
+    itemCount = await countFeed();
+  } catch {}
   return {
-    itemCount: status.totalItems,
+    itemCount,
     skippedEntries: status.totalSkippedEntries,
     lastUpdated: latestFeedSyncAt(status),
     mode: 'Read-only Home timeline sync via browser session',

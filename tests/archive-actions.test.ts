@@ -4,6 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import {
+  loadArchiveStore,
+  rebuildArchiveStoreFromCaches,
+} from '../src/archive-store.js';
+import { countArchiveItems, getArchiveItemByTweetId, listArchiveSources } from '../src/archive-index.js';
+import {
   removeBookmarkFromArchive,
   removeLikeFromArchive,
   removeLikesFromArchive,
@@ -48,12 +53,31 @@ const LIKE_FIXTURE = {
   ingestedVia: 'graphql',
 };
 
+const FEED_FIXTURE = {
+  id: 'f1',
+  tweetId: 'f1',
+  url: 'https://x.com/carol/status/f1',
+  text: 'Saved feed item',
+  authorHandle: 'carol',
+  authorName: 'Carol',
+  postedAt: '2026-03-01T00:00:00Z',
+  syncedAt: '2026-03-04T00:00:00Z',
+  sortIndex: '10',
+  fetchPage: 1,
+  fetchPosition: 1,
+  links: [],
+  mediaObjects: [],
+  tags: [],
+  ingestedVia: 'graphql',
+};
+
 async function withArchiveData(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-archive-actions-'));
   process.env.FT_DATA_DIR = dir;
   try {
     await writeFile(path.join(dir, 'bookmarks.jsonl'), `${JSON.stringify(BOOKMARK_FIXTURE)}\n`);
     await writeFile(path.join(dir, 'likes.jsonl'), `${JSON.stringify(LIKE_FIXTURE)}\n`);
+    await writeFile(path.join(dir, 'feed.jsonl'), `${JSON.stringify(FEED_FIXTURE)}\n`);
     await writeJson(path.join(dir, 'bookmarks-meta.json'), {
       provider: 'twitter',
       schemaVersion: 1,
@@ -66,6 +90,7 @@ async function withArchiveData(fn: (dir: string) => Promise<void>): Promise<void
     });
     await buildIndex({ force: true });
     await buildLikesIndex({ force: true });
+    await rebuildArchiveStoreFromCaches({ forceIndex: true });
     await fn(dir);
   } finally {
     delete process.env.FT_DATA_DIR;
@@ -79,6 +104,8 @@ test('removeLikeFromArchive deletes the cached like and rebuilds the likes index
     assert.equal(result.removed, true);
     assert.equal(result.totalRemaining, 0);
     assert.equal(await getLikeById('l1'), null);
+    assert.equal(await countArchiveItems(), 2);
+    assert.equal(await getArchiveItemByTweetId('l1'), null);
   });
 });
 
@@ -88,6 +115,8 @@ test('removeBookmarkFromArchive deletes the cached bookmark and rebuilds the boo
     assert.equal(result.removed, true);
     assert.equal(result.totalRemaining, 0);
     assert.equal(await getBookmarkById('b1'), null);
+    assert.equal(await countArchiveItems(), 2);
+    assert.equal(await getArchiveItemByTweetId('b1'), null);
   });
 });
 
@@ -234,5 +263,90 @@ test('upsertBookmarksInArchive inserts and updates bookmarks in one rebuild', as
     assert.equal(result.totalRecords, 2);
     assert.equal((await getBookmarkById('b1'))?.text, 'Updated bookmark text again');
     assert.ok(await getBookmarkById('b2'));
+  });
+});
+
+test('removeBookmarkFromArchive removes only the bookmark attachment for a multi-source item', async () => {
+  await withArchiveData(async (dir) => {
+    const sharedBookmark = {
+      ...BOOKMARK_FIXTURE,
+      id: 'bookmark-row',
+      tweetId: 'tweet-shared',
+      url: 'https://x.com/alice/status/tweet-shared',
+      text: 'Shared item',
+    };
+    const sharedLike = {
+      ...LIKE_FIXTURE,
+      id: 'like-row',
+      tweetId: 'tweet-shared',
+      url: 'https://x.com/alice/status/tweet-shared',
+      text: 'Shared item',
+    };
+
+    await writeFile(path.join(dir, 'bookmarks.jsonl'), `${JSON.stringify(sharedBookmark)}\n`);
+    await writeFile(path.join(dir, 'likes.jsonl'), `${JSON.stringify(sharedLike)}\n`);
+    await writeJson(path.join(dir, 'bookmarks-meta.json'), {
+      provider: 'twitter',
+      schemaVersion: 1,
+      totalBookmarks: 1,
+    });
+    await writeJson(path.join(dir, 'likes-meta.json'), {
+      provider: 'twitter',
+      schemaVersion: 1,
+      totalLikes: 1,
+    });
+    await buildIndex({ force: true });
+    await buildLikesIndex({ force: true });
+    await rebuildArchiveStoreFromCaches({ forceIndex: true });
+
+    const result = await removeBookmarkFromArchive('tweet-shared');
+    const archive = await loadArchiveStore();
+
+    assert.equal(result.removed, true);
+    assert.equal(await getBookmarkById('bookmark-row'), null);
+    assert.ok(await getLikeById('like-row'));
+    assert.equal(archive.length, 2);
+
+    const shared = archive.find((item) => item.tweetId === 'tweet-shared');
+    const indexed = await getArchiveItemByTweetId('tweet-shared');
+    const sources = await listArchiveSources('tweet-shared');
+    assert.ok(shared);
+    assert.ok(indexed);
+    assert.equal(shared?.sourceAttachments.bookmark, undefined);
+    assert.ok(shared?.sourceAttachments.like);
+    assert.equal(indexed?.sourceCount, 1);
+    assert.deepEqual(indexed?.sources, ['like']);
+    assert.deepEqual(sources.map((entry) => entry.source), ['like']);
+  });
+});
+
+test('upsert bookmark and like operations converge on one canonical multi-source item', async () => {
+  await withArchiveData(async () => {
+    await upsertBookmarkInArchive({
+      ...BOOKMARK_FIXTURE,
+      id: 'bookmark-row',
+      tweetId: 'tweet-shared',
+      url: 'https://x.com/alice/status/tweet-shared',
+      text: 'Shared item',
+    });
+    await upsertLikeInArchive({
+      ...LIKE_FIXTURE,
+      id: 'like-row',
+      tweetId: 'tweet-shared',
+      url: 'https://x.com/alice/status/tweet-shared',
+      text: 'Shared item',
+    });
+
+    const archive = await loadArchiveStore();
+    const shared = archive.find((item) => item.tweetId === 'tweet-shared');
+    const indexed = await getArchiveItemByTweetId('tweet-shared');
+    const sources = await listArchiveSources('tweet-shared');
+
+    assert.ok(shared);
+    assert.ok(indexed);
+    assert.deepEqual(Object.keys(shared?.sourceAttachments ?? {}).sort(), ['bookmark', 'like']);
+    assert.equal(indexed?.sourceCount, 2);
+    assert.deepEqual(indexed?.sources, ['bookmark', 'like']);
+    assert.deepEqual(sources.map((entry) => entry.source), ['bookmark', 'like']);
   });
 });

@@ -1,14 +1,14 @@
 import { startTransition, useEffect, useState } from 'react';
-import { fetchArchiveItem, fetchArchiveList, fetchFeedMetrics, fetchHybridSearch, fetchStatus } from './api';
+import { fetchFeedMetrics, fetchHybridSearch, fetchHybridSummary, fetchStatus, fetchUnifiedArchive, fetchUnifiedArchiveItem } from './api';
 import { ArchiveLayout } from './components/archive-layout';
 import type {
-  ArchiveSource,
+  ArchiveItem,
   BookmarkItem,
   FeedMetricsResponse,
   HybridSearchMode,
   HybridSearchResult,
-  LikeItem,
   StatusResponse,
+  ArchiveSource,
   ViewSource,
 } from './types';
 
@@ -18,9 +18,9 @@ export function App() {
   const [searchMode, setSearchMode] = useState<HybridSearchMode>('topic');
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [metrics, setMetrics] = useState<FeedMetricsResponse | null>(null);
-  const [items, setItems] = useState<Array<BookmarkItem | LikeItem | HybridSearchResult>>([]);
+  const [items, setItems] = useState<Array<ArchiveItem | HybridSearchResult>>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [selectedItem, setSelectedItem] = useState<BookmarkItem | LikeItem | HybridSearchResult | null>(null);
+  const [selectedItem, setSelectedItem] = useState<ArchiveItem | HybridSearchResult | null>(null);
   const [queryInput, setQueryInput] = useState('');
   const [submittedQuery, setSubmittedQuery] = useState('');
   const [searchSummary, setSearchSummary] = useState<string | null>(null);
@@ -70,17 +70,24 @@ export function App() {
     setSearchSummary(null);
 
     const request = source === 'search'
-      ? fetchHybridSearch(submittedQuery, { mode: searchMode, limit: 40 })
-      : fetchArchiveList(archiveSource, { query: submittedQuery, limit: 40, offset: 0 });
+      ? Promise.all([
+        fetchHybridSearch(submittedQuery, { mode: searchMode, limit: 40 }),
+        submittedQuery
+          ? fetchHybridSummary(submittedQuery, { mode: searchMode, limit: 8 })
+          : Promise.resolve(null),
+      ])
+      : fetchUnifiedArchive({ source: archiveSource, query: submittedQuery, limit: 40, offset: 0 });
 
     request
       .then((response) => {
         if (cancelled) return;
-        const nextItems = response.items;
+        const payload = Array.isArray(response) ? response[0] : response;
+        const nextItems = payload.items;
         setItems(nextItems);
         setSelectedId(nextItems[0]?.id ?? null);
         if (source === 'search') {
           setSelectedItem(nextItems[0] ?? null);
+          setSearchSummary(Array.isArray(response) ? response[1]?.summary ?? null : null);
         }
       })
       .catch((error: Error) => {
@@ -114,7 +121,7 @@ export function App() {
     setDetailLoading(true);
     setDetailError(null);
 
-    fetchArchiveItem(archiveSource, selectedId)
+    fetchUnifiedArchiveItem(selectedId)
       .then((item) => {
         if (!cancelled) setSelectedItem(item);
       })

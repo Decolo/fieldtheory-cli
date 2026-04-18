@@ -3,6 +3,13 @@ import { openDb, saveDb } from './db.js';
 import { readJsonLines } from './fs.js';
 import { twitterFeedCachePath, twitterFeedIndexPath } from './paths.js';
 import type { FeedRecord } from './types.js';
+import {
+  countFeedProjections,
+  getFeedProjectionById,
+  listFeedProjections,
+  searchFeedProjections,
+} from './archive-projections.js';
+import { rebuildArchiveStoreFromCaches } from './archive-store.js';
 
 export interface FeedTimelineItem {
   id: string;
@@ -95,6 +102,11 @@ function feedSortClause(): string {
       COALESCE(f.fetch_position, 2147483647) ASC,
       CAST(f.tweet_id AS INTEGER) DESC
   `;
+}
+
+function isMissingFeedIndexError(error: unknown): boolean {
+  const message = (error as Error).message ?? '';
+  return message.includes('no such table') || message.includes('no such column');
 }
 
 function initSchema(db: Database): void {
@@ -223,6 +235,7 @@ export async function buildFeedIndex(options?: { force?: boolean }): Promise<{ d
     db.run(`INSERT INTO feed_fts(feed_fts) VALUES('rebuild')`);
     saveDb(db, dbPath);
     const totalRows = db.exec('SELECT COUNT(*) FROM feed')[0]?.values[0]?.[0] as number;
+    await rebuildArchiveStoreFromCaches({ buildIndex: true, forceIndex: options?.force ?? false });
     return { dbPath, recordCount: totalRows, newRecords: newRecords.length };
   } finally {
     db.close();
@@ -234,50 +247,56 @@ export async function searchFeed(query: string, limit = 20): Promise<FeedSearchR
   const db = await openDb(dbPath);
 
   try {
-    if (ensureFeedFts(db)) {
-      saveDb(db, dbPath);
+    ensureFeedFts(db);
+    const rows = db.exec(
+      `
+        SELECT
+          f.id,
+          f.tweet_id,
+          f.url,
+          f.text,
+          f.author_handle,
+          f.author_name,
+          f.posted_at,
+          f.synced_at,
+          bm25(feed_fts, 5.0, 1.0, 1.0) as score
+        FROM feed f
+        JOIN feed_fts ON feed_fts.rowid = f.rowid
+        WHERE f.rowid IN (SELECT rowid FROM feed_fts WHERE feed_fts MATCH ?)
+        ORDER BY bm25(feed_fts, 5.0, 1.0, 1.0) ASC
+        LIMIT ?
+      `,
+      [query, limit],
+    );
+    saveDb(db, dbPath);
+    return (rows[0]?.values ?? []).map((row) => ({
+      id: String(row[0]),
+      tweetId: String(row[1]),
+      url: String(row[2]),
+      text: String(row[3] ?? ''),
+      authorHandle: (row[4] as string) ?? undefined,
+      authorName: (row[5] as string) ?? undefined,
+      postedAt: (row[6] as string) ?? null,
+      syncedAt: String(row[7]),
+      score: Number(row[8] ?? 0),
+    }));
+  } catch (error) {
+    const message = (error as Error).message ?? '';
+    if (message.includes('fts5') || message.includes('MATCH') || message.includes('syntax')) {
+      throw new Error(`Invalid search query: "${query}". Try simpler terms or wrap phrases in double quotes.`);
     }
-    let rows;
-    try {
-      rows = db.exec(
-        `
-          SELECT
-            f.id,
-            f.tweet_id,
-            f.url,
-            f.text,
-            f.author_handle,
-            f.author_name,
-            f.posted_at,
-            f.synced_at,
-            bm25(feed_fts, 5.0, 1.0, 1.0) as score
-          FROM feed f
-          JOIN feed_fts ON feed_fts.rowid = f.rowid
-          WHERE f.rowid IN (SELECT rowid FROM feed_fts WHERE feed_fts MATCH ?)
-          ORDER BY bm25(feed_fts, 5.0, 1.0, 1.0) ASC
-          LIMIT ?
-        `,
-        [query, limit],
-      );
-    } catch (error) {
-      const message = (error as Error).message ?? '';
-      if (message.includes('fts5') || message.includes('MATCH') || message.includes('syntax')) {
-        throw new Error(`Invalid search query: "${query}". Try simpler terms or wrap phrases in double quotes.`);
-      }
-      throw error;
-    }
-
-    if (!rows.length) return [];
-    return rows[0].values.map((row) => ({
-      id: row[0] as string,
-      tweetId: row[1] as string,
-      url: row[2] as string,
-      text: row[3] as string,
-      authorHandle: row[4] as string | undefined,
-      authorName: row[5] as string | undefined,
-      postedAt: row[6] as string | null,
-      syncedAt: row[7] as string,
-      score: row[8] as number,
+    if (!isMissingFeedIndexError(error)) throw error;
+    const rows = await searchFeedProjections(query, limit);
+    return rows.map((row) => ({
+      id: row.id,
+      tweetId: row.tweetId,
+      url: row.url,
+      text: row.text,
+      authorHandle: row.authorHandle,
+      authorName: row.authorName,
+      postedAt: row.postedAt ?? null,
+      syncedAt: row.syncedAt,
+      score: row.score,
     }));
   } finally {
     db.close();
@@ -285,9 +304,8 @@ export async function searchFeed(query: string, limit = 20): Promise<FeedSearchR
 }
 
 export async function listFeed(filters: FeedTimelineFilters = {}): Promise<FeedTimelineItem[]> {
-  const db = await openDb(twitterFeedIndexPath());
-  const limit = filters.limit ?? 30;
-  const offset = filters.offset ?? 0;
+  const dbPath = twitterFeedIndexPath();
+  const db = await openDb(dbPath);
 
   try {
     const rows = db.exec(
@@ -319,58 +337,72 @@ export async function listFeed(filters: FeedTimelineFilters = {}): Promise<FeedT
         LIMIT ?
         OFFSET ?
       `,
-      [limit, offset],
+      [filters.limit ?? 30, filters.offset ?? 0],
     );
-    if (!rows.length) return [];
-    return rows[0].values.map((row) => mapTimelineRow(row));
+    return (rows[0]?.values ?? []).map((row) => mapTimelineRow(row));
+  } catch (error) {
+    if (!isMissingFeedIndexError(error)) throw error;
+    return listFeedProjections(filters);
   } finally {
     db.close();
   }
 }
 
 export async function countFeed(): Promise<number> {
-  const db = await openDb(twitterFeedIndexPath());
+  const dbPath = twitterFeedIndexPath();
+  const db = await openDb(dbPath);
+
   try {
     const rows = db.exec('SELECT COUNT(*) FROM feed');
     return Number(rows[0]?.values?.[0]?.[0] ?? 0);
+  } catch (error) {
+    if (!isMissingFeedIndexError(error)) throw error;
+    return countFeedProjections();
   } finally {
     db.close();
   }
 }
 
 export async function getFeedById(id: string): Promise<FeedTimelineItem | null> {
-  const db = await openDb(twitterFeedIndexPath());
+  const dbPath = twitterFeedIndexPath();
+  const db = await openDb(dbPath);
+
   try {
     const rows = db.exec(
-      `SELECT
-        f.id,
-        f.tweet_id,
-        f.url,
-        f.text,
-        f.author_handle,
-        f.author_name,
-        f.author_profile_image_url,
-        f.posted_at,
-        f.synced_at,
-        f.sort_index,
-        f.fetch_page,
-        f.fetch_position,
-        f.links_json,
-        f.media_count,
-        f.link_count,
-        f.like_count,
-        f.repost_count,
-        f.reply_count,
-        f.quote_count,
-        f.bookmark_count,
-        f.view_count
-      FROM feed f
-      WHERE f.id = ?
-      LIMIT 1`,
-      [id],
+      `
+        SELECT
+          f.id,
+          f.tweet_id,
+          f.url,
+          f.text,
+          f.author_handle,
+          f.author_name,
+          f.author_profile_image_url,
+          f.posted_at,
+          f.synced_at,
+          f.sort_index,
+          f.fetch_page,
+          f.fetch_position,
+          f.links_json,
+          f.media_count,
+          f.link_count,
+          f.like_count,
+          f.repost_count,
+          f.reply_count,
+          f.quote_count,
+          f.bookmark_count,
+          f.view_count
+        FROM feed f
+        WHERE f.id = ? OR f.tweet_id = ?
+        LIMIT 1
+      `,
+      [id, id],
     );
     const row = rows[0]?.values?.[0];
     return row ? mapTimelineRow(row) : null;
+  } catch (error) {
+    if (!isMissingFeedIndexError(error)) throw error;
+    return getFeedProjectionById(id);
   } finally {
     db.close();
   }

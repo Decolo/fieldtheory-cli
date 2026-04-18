@@ -1,11 +1,14 @@
 import type {
-  ArchiveSource,
+  ArchiveFilter,
+  ArchiveItem,
+  ArchiveListResponse,
   BookmarkItem,
   FeedMetricsResponse,
   HybridSearchMode,
   HybridSearchResponse,
   HybridSearchScope,
   HybridSummaryResponse,
+  LegacyArchiveSource,
   LikeItem,
   ListResponse,
   StatusResponse,
@@ -29,7 +32,7 @@ export async function fetchFeedMetrics(): Promise<FeedMetricsResponse> {
 }
 
 export async function fetchArchiveList(
-  source: ArchiveSource,
+  source: LegacyArchiveSource,
   options: { query?: string; limit?: number; offset?: number } = {},
 ): Promise<ListResponse<BookmarkItem> | ListResponse<LikeItem>> {
   const params = new URLSearchParams();
@@ -40,8 +43,24 @@ export async function fetchArchiveList(
   return requestJson(`/api/${source}${suffix ? `?${suffix}` : ''}`);
 }
 
-export async function fetchArchiveItem(source: ArchiveSource, id: string): Promise<BookmarkItem | LikeItem> {
+export async function fetchArchiveItem(source: LegacyArchiveSource, id: string): Promise<BookmarkItem | LikeItem> {
   return requestJson(`/api/${source}/${id}`);
+}
+
+export async function fetchUnifiedArchive(
+  options: { source?: ArchiveFilter; query?: string; limit?: number; offset?: number } = {},
+): Promise<ArchiveListResponse> {
+  const params = new URLSearchParams();
+  if (options.source) params.set('source', options.source);
+  if (options.query) params.set('query', options.query);
+  if (options.limit) params.set('limit', String(options.limit));
+  if (options.offset) params.set('offset', String(options.offset));
+  const suffix = params.toString();
+  return requestJson(`/api/archive${suffix ? `?${suffix}` : ''}`);
+}
+
+export async function fetchUnifiedArchiveItem(id: string): Promise<ArchiveItem> {
+  return requestJson(`/api/archive/${id}`);
 }
 
 export async function fetchHybridSearch(

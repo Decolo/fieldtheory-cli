@@ -1,26 +1,28 @@
 import type {
-  ArchiveSource,
-  BookmarkItem,
+  ArchiveItem,
   HybridSearchResult,
-  LikeItem,
   ViewSource,
 } from '../types';
 
 interface ItemListProps {
-  items: Array<BookmarkItem | LikeItem | HybridSearchResult>;
+  items: Array<ArchiveItem | HybridSearchResult>;
   source: ViewSource;
   selectedId?: string | null;
   loading: boolean;
   onSelect: (id: string) => void;
 }
 
-function getItemDate(source: ViewSource, item: BookmarkItem | LikeItem | HybridSearchResult): string {
+function getItemDate(source: ViewSource, item: ArchiveItem | HybridSearchResult): string {
   if (source === 'search') {
     return (item as HybridSearchResult).postedAt ?? '';
   }
-  return source === 'bookmarks'
-    ? (item as BookmarkItem).bookmarkedAt ?? item.postedAt ?? ''
-    : (item as LikeItem).likedAt ?? item.postedAt ?? '';
+  const archiveItem = item as ArchiveItem;
+  const sourceDate = archiveItem.sourceDates[source as ArchiveItem['source']];
+  return sourceDate ?? archiveItem.postedAt ?? '';
+}
+
+function isHybridSearchResult(item: ArchiveItem | HybridSearchResult): item is HybridSearchResult {
+  return Array.isArray((item as HybridSearchResult).sources);
 }
 
 export function ItemList({ items, source, selectedId, loading, onSelect }: ItemListProps) {
@@ -47,12 +49,12 @@ export function ItemList({ items, source, selectedId, loading, onSelect }: ItemL
           </div>
           <p className="item-text">{item.text}</p>
           <div className="item-meta">
-            {source === 'search'
-              ? <span>{(item as HybridSearchResult).sources.join('+')}</span>
-              : <span>{item.linkCount} links</span>}
-            {source === 'search'
-              ? <span>score {(item as HybridSearchResult).score.toFixed(2)}</span>
-              : <span>{item.mediaCount} media</span>}
+            {source === 'search' && isHybridSearchResult(item)
+              ? <span>{item.sources.join('+')}</span>
+              : <span>{(item as ArchiveItem).sources.join('+')}</span>}
+            {source === 'search' && isHybridSearchResult(item)
+              ? <span>score {item.score.toFixed(2)}</span>
+              : <span>{(item as ArchiveItem).sourceCount} sources</span>}
           </div>
         </button>
       ))}

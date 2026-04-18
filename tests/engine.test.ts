@@ -165,17 +165,18 @@ test('resolveEngine: single available engine is used without prompting', async (
   }
 });
 
-// ── ft model CLI parsing ───────────────────────────────────────────────
+// ── ft bookmarks model CLI parsing ─────────────────────────────────────
 
-test('ft model: command is registered and shows help', async () => {
+test('ft bookmarks model: command is registered and shows help', async () => {
   const { buildCli } = await import('../src/cli.js');
   const program = buildCli();
-  const modelCmd = program.commands.find((c: any) => c.name() === 'model');
+  const bookmarksCmd = program.commands.find((c: any) => c.name() === 'bookmarks');
+  const modelCmd = bookmarksCmd?.commands.find((c: any) => c.name() === 'model');
   assert.ok(modelCmd, 'model command should be registered');
   assert.ok(modelCmd.description().includes('LLM engine'));
 });
 
-test('ft model: direct set persists preference', async () => {
+test('ft bookmarks model: direct set persists preference', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-engine-test-'));
   const origEnv = process.env.FT_DATA_DIR;
   process.env.FT_DATA_DIR = tmpDir;
@@ -187,7 +188,7 @@ test('ft model: direct set persists preference', async () => {
     const available = detectAvailableEngines();
     if (available.length === 0) return;
 
-    // Simulate what `ft model <name>` does
+    // Simulate what `ft bookmarks model <name>` does
     const name = available[0];
     savePreferences({ ...loadPreferences(), defaultEngine: name });
     assert.equal(loadPreferences().defaultEngine, name);

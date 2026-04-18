@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 
 // ── md-prompts: sanitizeForPrompt ───────────────────────────────────────
 import { sanitizeForPrompt } from '../src/md-prompts.js';
+import { writeJson, writeJsonLines } from '../src/fs.js';
 
 test('sanitizeForPrompt: truncates to maxLen', () => {
   const input = 'a'.repeat(500);
@@ -120,6 +124,7 @@ test('stripWikiUpdatesSection: leaves answer unchanged when no section', () => {
 
 // ── md-ask: scorePageName ───────────────────────────────────────────────
 import { scorePageNameForTest } from '../src/md-ask.js';
+import { askMd } from '../src/md-ask.js';
 
 test('scorePageName: counts matching words from question', () => {
   const words = new Set(['tool', 'security', 'github']);
@@ -131,6 +136,79 @@ test('scorePageName: counts matching words from question', () => {
 test('scorePageName: hyphen-separated page names are split into words', () => {
   const words = new Set(['open', 'source']);
   assert.equal(scorePageNameForTest('open-source', words), 2);
+});
+
+test('askMd saves archive-backed concept pages with archive source metadata', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-md-ask-'));
+  const binDir = path.join(dir, 'bin');
+  const previousDataDir = process.env.FT_DATA_DIR;
+  const previousPath = process.env.PATH;
+  const previousDisable = process.env.FT_DISABLE_LLM_ASSIST;
+
+  process.env.FT_DATA_DIR = dir;
+  process.env.FT_DISABLE_LLM_ASSIST = '0';
+
+  try {
+    await mkdir(binDir, { recursive: true });
+    await mkdir(path.join(dir, 'md'), { recursive: true });
+    await writeFile(path.join(dir, 'md', 'index.md'), '# Index\n');
+    await writeJsonLines(path.join(dir, 'bookmarks.jsonl'), [
+      {
+        id: 'bm-ask-1',
+        tweetId: 'bm-ask-1',
+        url: 'https://x.com/alice/status/bm-ask-1',
+        text: 'Claude Code archive-backed notes for local agent workflows.',
+        authorHandle: 'alice',
+        authorName: 'Alice',
+        syncedAt: '2026-04-01T00:00:00Z',
+        postedAt: '2026-04-01T00:00:00Z',
+        bookmarkedAt: '2026-04-01T00:00:00Z',
+        links: [],
+        tags: [],
+        media: [],
+        ingestedVia: 'browser',
+      },
+    ]);
+    await writeJson(path.join(dir, 'bookmarks-meta.json'), {
+      provider: 'twitter',
+      schemaVersion: 1,
+      totalBookmarks: 1,
+    });
+    await writeJsonLines(path.join(dir, 'likes.jsonl'), []);
+    await writeJson(path.join(dir, 'likes-meta.json'), {
+      provider: 'twitter',
+      schemaVersion: 1,
+      totalLikes: 0,
+    });
+    await writeJsonLines(path.join(dir, 'feed.jsonl'), []);
+    await writeJson(path.join(dir, 'feed-meta.json'), {
+      provider: 'twitter',
+      schemaVersion: 1,
+      totalItems: 0,
+      totalSkippedEntries: 0,
+    });
+
+    await writeFile(
+      path.join(binDir, 'codex'),
+      '#!/bin/sh\nprintf "%s\\n" "Answer with a citation ([source](https://x.com/alice/status/bm-ask-1))."\nprintf "%s\\n" ""\nprintf "%s\\n" "## Wiki Updates"\n',
+    );
+    await chmod(path.join(binDir, 'codex'), 0o755);
+    process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ''}`;
+
+    const result = await askMd('What did I save about Claude Code?', { save: true, onProgress: () => {} });
+    assert.ok(result.savedAs);
+
+    const saved = await readFile(result.savedAs!, 'utf8');
+    assert.match(saved, /source_type: archive/);
+  } finally {
+    if (previousDataDir == null) delete process.env.FT_DATA_DIR;
+    else process.env.FT_DATA_DIR = previousDataDir;
+    if (previousPath == null) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousDisable == null) delete process.env.FT_DISABLE_LLM_ASSIST;
+    else process.env.FT_DISABLE_LLM_ASSIST = previousDisable;
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 // ── md-prompts: prompt structure ────────────────────────────────────────

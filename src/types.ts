@@ -1,3 +1,12 @@
+import type { ArchiveRecordBase } from './archive-core.js';
+export type {
+  ArchiveIngestMode,
+  ArchiveItem,
+  ArchiveSourceAttachment,
+  ArchiveSourceAttachments,
+  ArchiveSourceKind,
+} from './archive-core.js';
+
 export interface BookmarkMediaVariant {
   url?: string;
   contentType?: string;
@@ -19,15 +28,21 @@ export interface BookmarkMediaObject {
 }
 
 export interface BookmarkAuthorSnapshot {
+  id?: string;
   handle?: string;
   name?: string;
   profileImageUrl?: string;
+  bio?: string;
+  followerCount?: number;
+  followingCount?: number;
+  tweetCount?: number;
+  isVerified?: boolean;
+  snapshotAt?: string;
   description?: string;
   location?: string;
   url?: string;
   verified?: boolean;
   followersCount?: number;
-  followingCount?: number;
   statusesCount?: number;
 }
 
@@ -52,91 +67,31 @@ export interface QuotedTweetSnapshot {
   url: string;
 }
 
-export interface BookmarkRecord {
+/** Compatibility projection over the canonical archive item model. */
+export interface BookmarkRecord extends ArchiveRecordBase {
   id: string;
   tweetId: string;
-  authorHandle?: string;
-  authorName?: string;
-  authorProfileImageUrl?: string;
-  author?: BookmarkAuthorSnapshot;
-  url: string;
-  text: string;
-  postedAt?: string | null;
   bookmarkedAt?: string | null;
   /** X's opaque bookmark ordering key. Useful for chronology, not timestamps. */
   sortIndex?: string | null;
-  syncedAt: string;
-  conversationId?: string;
-  inReplyToStatusId?: string;
-  inReplyToUserId?: string;
-  quotedStatusId?: string;
-  quotedTweet?: QuotedTweetSnapshot;
-  language?: string;
-  sourceApp?: string;
-  possiblySensitive?: boolean;
-  engagement?: BookmarkEngagementSnapshot;
-  media?: string[];
-  mediaObjects?: BookmarkMediaObject[];
-  links?: string[];
-  tags?: string[];
   ingestedVia?: 'api' | 'browser' | 'graphql';
 }
 
-export interface LikeRecord {
+/** Compatibility projection over the canonical archive item model. */
+export interface LikeRecord extends ArchiveRecordBase {
   id: string;
   tweetId: string;
-  authorHandle?: string;
-  authorName?: string;
-  authorProfileImageUrl?: string;
-  author?: BookmarkAuthorSnapshot;
-  url: string;
-  text: string;
-  postedAt?: string | null;
   likedAt?: string | null;
-  syncedAt: string;
-  conversationId?: string;
-  inReplyToStatusId?: string;
-  inReplyToUserId?: string;
-  quotedStatusId?: string;
-  quotedTweet?: QuotedTweetSnapshot;
-  language?: string;
-  sourceApp?: string;
-  possiblySensitive?: boolean;
-  engagement?: BookmarkEngagementSnapshot;
-  media?: string[];
-  mediaObjects?: BookmarkMediaObject[];
-  links?: string[];
-  tags?: string[];
   ingestedVia?: 'browser' | 'graphql';
 }
 
-export interface FeedRecord {
+/** Compatibility projection over the canonical archive item model. */
+export interface FeedRecord extends ArchiveRecordBase {
   id: string;
   tweetId: string;
-  authorHandle?: string;
-  authorName?: string;
-  authorProfileImageUrl?: string;
-  author?: BookmarkAuthorSnapshot;
-  url: string;
-  text: string;
-  postedAt?: string | null;
-  syncedAt: string;
   sortIndex?: string | null;
   fetchPage?: number | null;
   fetchPosition?: number | null;
-  conversationId?: string;
-  inReplyToStatusId?: string;
-  inReplyToUserId?: string;
-  quotedStatusId?: string;
-  quotedTweet?: QuotedTweetSnapshot;
-  language?: string;
-  sourceApp?: string;
-  possiblySensitive?: boolean;
-  engagement?: BookmarkEngagementSnapshot;
-  media?: string[];
-  mediaObjects?: BookmarkMediaObject[];
-  links?: string[];
-  tags?: string[];
   ingestedVia?: 'graphql';
 }
 
@@ -250,7 +205,6 @@ export interface XOAuthTokenSet {
   token_type?: string;
   obtained_at: string;
 }
-
 export interface BookmarkBackfillState {
   provider: 'twitter';
   lastRunAt?: string;

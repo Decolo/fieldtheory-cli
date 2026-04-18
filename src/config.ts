@@ -47,24 +47,3 @@ export function loadChromeSessionConfig(overrides: { browserId?: string } = {}):
 
   return { chromeUserDataDir: dir, chromeProfileDirectory: profileDirectory, browser };
 }
-
-export function loadXApiConfig() {
-  loadEnv();
-
-  const apiKey = process.env.X_API_KEY ?? process.env.X_CONSUMER_KEY;
-  const apiSecret = process.env.X_API_SECRET ?? process.env.X_SECRET_KEY;
-  const clientId = process.env.X_CLIENT_ID;
-  const clientSecret = process.env.X_CLIENT_SECRET;
-  const bearerToken = process.env.X_BEARER_TOKEN;
-  const callbackUrl = process.env.X_CALLBACK_URL ?? 'http://127.0.0.1:3000/callback';
-
-  if (!apiKey || !apiSecret || !clientId || !clientSecret) {
-    throw new Error(
-      'Missing X API credentials for API sync.\n' +
-      'Set X_API_KEY, X_API_SECRET, X_CLIENT_ID, and X_CLIENT_SECRET in .env.\n' +
-      'These are only needed for --api mode. Default sync uses your browser session.'
-    );
-  }
-
-  return { apiKey, apiSecret, clientId, clientSecret, bearerToken, callbackUrl };
-}

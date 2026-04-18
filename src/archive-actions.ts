@@ -1,4 +1,5 @@
 import { buildIndex } from './bookmarks-db.js';
+import { rebuildArchiveStoreFromCaches } from './archive-store.js';
 import { readJson, readJsonLines, writeJson, writeJsonLines, pathExists } from './fs.js';
 import { buildLikesIndex } from './likes-db.js';
 import {
@@ -42,28 +43,56 @@ export interface ArchiveBulkUpsertResult {
   dbPath: string;
 }
 
-async function rewriteBookmarkMeta(totalBookmarks: number): Promise<void> {
-  const metaPath = twitterBookmarksMetaPath();
-  const existing: BookmarkCacheMeta = await pathExists(metaPath)
-    ? await readJson<BookmarkCacheMeta>(metaPath)
-    : { provider: 'twitter', schemaVersion: 1, totalBookmarks };
-
-  await writeJson(metaPath, {
-    ...existing,
-    totalBookmarks,
-  } satisfies BookmarkCacheMeta);
+async function rebuildDerivedArchives(source: 'bookmark' | 'like'): Promise<string> {
+  const index = source === 'bookmark'
+    ? await buildIndex({ force: true })
+    : await buildLikesIndex({ force: true });
+  await rebuildArchiveStoreFromCaches({ forceIndex: true });
+  return index.dbPath;
 }
 
-async function rewriteLikesMeta(totalLikes: number): Promise<void> {
+async function rewriteSourceMeta(totalRecords: number, source: 'bookmark' | 'like'): Promise<void> {
+  if (source === 'bookmark') {
+    const metaPath = twitterBookmarksMetaPath();
+    const existing: BookmarkCacheMeta = await pathExists(metaPath)
+      ? await readJson<BookmarkCacheMeta>(metaPath)
+      : { provider: 'twitter', schemaVersion: 1, totalBookmarks: totalRecords };
+    await writeJson(metaPath, {
+      ...existing,
+      totalBookmarks: totalRecords,
+    } satisfies BookmarkCacheMeta);
+    return;
+  }
+
   const metaPath = twitterLikesMetaPath();
   const existing: LikesCacheMeta = await pathExists(metaPath)
     ? await readJson<LikesCacheMeta>(metaPath)
-    : { provider: 'twitter', schemaVersion: 1, totalLikes };
-
+    : { provider: 'twitter', schemaVersion: 1, totalLikes: totalRecords };
   await writeJson(metaPath, {
     ...existing,
-    totalLikes,
+    totalLikes: totalRecords,
   } satisfies LikesCacheMeta);
+}
+
+async function rewriteBookmarkMeta(totalBookmarks: number): Promise<void> {
+  await rewriteSourceMeta(totalBookmarks, 'bookmark');
+}
+
+async function rewriteLikesMeta(totalLikes: number): Promise<void> {
+  await rewriteSourceMeta(totalLikes, 'like');
+}
+
+async function rewriteSourceCache<T extends { id: string; tweetId: string }>(
+  source: 'bookmark' | 'like',
+  rows: T[],
+): Promise<{ cachePath: string; dbPath: string }> {
+  const cachePath = source === 'bookmark' ? twitterBookmarksCachePath() : twitterLikesCachePath();
+  await writeJsonLines(cachePath, rows);
+  await rewriteSourceMeta(rows.length, source);
+  return {
+    cachePath,
+    dbPath: await rebuildDerivedArchives(source),
+  };
 }
 
 export async function removeBookmarkFromArchive(tweetId: string): Promise<ArchiveRemovalResult> {
@@ -72,17 +101,15 @@ export async function removeBookmarkFromArchive(tweetId: string): Promise<Archiv
   const removedRecord = existing.find((record) => record.id === tweetId || record.tweetId === tweetId);
   const next = existing.filter((record) => record.id !== tweetId && record.tweetId !== tweetId);
 
-  await writeJsonLines(cachePath, next);
-  await rewriteBookmarkMeta(next.length);
-  const index = await buildIndex({ force: true });
+  const rewritten = await rewriteSourceCache('bookmark', next);
 
   return {
     removed: Boolean(removedRecord),
     tweetId,
     removedRecordId: removedRecord?.id,
     totalRemaining: next.length,
-    cachePath,
-    dbPath: index.dbPath,
+    cachePath: rewritten.cachePath,
+    dbPath: rewritten.dbPath,
   };
 }
 
@@ -92,17 +119,15 @@ export async function removeLikeFromArchive(tweetId: string): Promise<ArchiveRem
   const removedRecord = existing.find((record) => record.id === tweetId || record.tweetId === tweetId);
   const next = existing.filter((record) => record.id !== tweetId && record.tweetId !== tweetId);
 
-  await writeJsonLines(cachePath, next);
-  await rewriteLikesMeta(next.length);
-  const index = await buildLikesIndex({ force: true });
+  const rewritten = await rewriteSourceCache('like', next);
 
   return {
     removed: Boolean(removedRecord),
     tweetId,
     removedRecordId: removedRecord?.id,
     totalRemaining: next.length,
-    cachePath,
-    dbPath: index.dbPath,
+    cachePath: rewritten.cachePath,
+    dbPath: rewritten.dbPath,
   };
 }
 
@@ -123,16 +148,14 @@ export async function removeLikesFromArchive(tweetIds: string[]): Promise<Archiv
     .map((record) => record.id);
   const next = existing.filter((record) => !targets.has(record.id) && !targets.has(record.tweetId));
 
-  await writeJsonLines(cachePath, next);
-  await rewriteLikesMeta(next.length);
-  const index = await buildLikesIndex({ force: true });
+  const rewritten = await rewriteSourceCache('like', next);
 
   return {
     removedIds,
     missingIds: tweetIds.filter((tweetId) => !matchedTargets.has(tweetId)),
     totalRemaining: next.length,
-    cachePath,
-    dbPath: index.dbPath,
+    cachePath: rewritten.cachePath,
+    dbPath: rewritten.dbPath,
   };
 }
 
@@ -180,16 +203,14 @@ export async function upsertBookmarksInArchive(records: BookmarkRecord[]): Promi
     else updatedCount += 1;
   }
 
-  await writeJsonLines(cachePath, rows);
-  await rewriteBookmarkMeta(rows.length);
-  const index = await buildIndex({ force: true });
+  const rewritten = await rewriteSourceCache('bookmark', rows);
 
   return {
     insertedCount,
     updatedCount,
     totalRecords: rows.length,
-    cachePath,
-    dbPath: index.dbPath,
+    cachePath: rewritten.cachePath,
+    dbPath: rewritten.dbPath,
   };
 }
 
@@ -218,15 +239,13 @@ export async function upsertLikesInArchive(records: LikeRecord[]): Promise<Archi
     else updatedCount += 1;
   }
 
-  await writeJsonLines(cachePath, rows);
-  await rewriteLikesMeta(rows.length);
-  const index = await buildLikesIndex({ force: true });
+  const rewritten = await rewriteSourceCache('like', rows);
 
   return {
     insertedCount,
     updatedCount,
     totalRecords: rows.length,
-    cachePath,
-    dbPath: index.dbPath,
+    cachePath: rewritten.cachePath,
+    dbPath: rewritten.dbPath,
   };
 }

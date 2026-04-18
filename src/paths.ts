@@ -28,10 +28,6 @@ export function twitterBookmarksMetaPath(): string {
   return path.join(dataDir(), 'bookmarks-meta.json');
 }
 
-export function twitterOauthTokenPath(): string {
-  return path.join(dataDir(), 'oauth-token.json');
-}
-
 export function twitterBackfillStatePath(): string {
   return path.join(dataDir(), 'bookmarks-backfill-state.json');
 }
@@ -82,6 +78,14 @@ export function twitterFeedStatePath(): string {
 
 export function twitterFeedIndexPath(): string {
   return path.join(dataDir(), 'feed.db');
+}
+
+export function twitterArchiveCachePath(): string {
+  return path.join(dataDir(), 'archive.jsonl');
+}
+
+export function twitterArchiveIndexPath(): string {
+  return path.join(dataDir(), 'archive.db');
 }
 
 export function isFeedFirstRun(): boolean {

@@ -2,9 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import {
+  convertLikedTweetToArchiveItem,
   convertLikedTweetToRecord,
+  emitLikeArchiveItem,
   parseLikesResponse,
   mergeLikeRecord,
   mergeLikes,
@@ -150,6 +152,30 @@ test('convertLikedTweetToRecord: extracts engagement, media, and links', () => {
   assert.deepEqual(result.links, ['https://example.com/article']);
 });
 
+test('convertLikedTweetToArchiveItem: emits canonical like attachment metadata and normalized text', () => {
+  const result = convertLikedTweetToArchiveItem(makeLikedTweet(), NOW);
+  assert.ok(result);
+  assert.equal(result?.id, '1234567890');
+  assert.equal(result?.tweetId, '1234567890');
+  assert.equal(result?.normalizedText, 'Hello world, this is a liked tweet!');
+  assert.equal(result?.sourceAttachments.like?.source, 'like');
+  assert.equal(result?.sourceAttachments.like?.syncedAt, NOW);
+  assert.equal(result?.sourceAttachments.like?.metadata?.sourceRecordId, '1234567890');
+});
+
+test('emitLikeArchiveItem: preserves like-specific source timestamp', () => {
+  const item = emitLikeArchiveItem(makeRecord({
+    id: 'like-row-1',
+    tweetId: '777',
+    text: 'like text',
+    likedAt: '2026-03-27T00:00:00.000Z',
+  }));
+
+  assert.equal(item.id, '777');
+  assert.equal(item.sourceAttachments.like?.sourceTimestamp, '2026-03-27T00:00:00.000Z');
+  assert.equal(item.sourceAttachments.like?.metadata?.sourceRecordId, 'like-row-1');
+});
+
 test('convertLikedTweetToRecord: returns null when tweet id is missing', () => {
   assert.equal(convertLikedTweetToRecord({ full_text: 'hi' }, NOW), null);
 });
@@ -233,6 +259,57 @@ test('syncLikesGraphQL: preserves previously archived likes absent from latest r
     });
     assert.equal(result.added, 1);
     assert.equal(result.totalLikes, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.FT_DATA_DIR;
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('syncLikesGraphQL: fails closed when archive rebuild encounters a malformed sibling cache', async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'ft-sync-likes-malformed-'));
+  process.env.FT_DATA_DIR = tmpDir;
+
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify(makeViewerResponse('viewer-1')), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (calls === 2) {
+      return new Response(JSON.stringify(
+        makeLikesTimelineResponse([makeLikedTweet({ id_str: '200', full_text: 'new like' })]),
+      ), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(makeLikesTimelineResponse([], '')), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  try {
+    await writeFile(path.join(tmpDir, 'bookmarks.jsonl'), '{"id":"broken"\n', 'utf8');
+
+    await assert.rejects(
+      syncLikesGraphQL({
+        csrfToken: 'ct0-token',
+        cookieHeader: 'ct0=ct0-token; auth_token=auth',
+        maxPages: 5,
+        delayMs: 0,
+        stalePageLimit: 1,
+      }),
+      /Failed to rebuild archive from cache .*bookmarks\.jsonl/,
+    );
+
+    const likesCache = await readFile(path.join(tmpDir, 'likes.jsonl'), 'utf8');
+    assert.match(likesCache, /"tweetId":"200"/);
   } finally {
     globalThis.fetch = originalFetch;
     delete process.env.FT_DATA_DIR;

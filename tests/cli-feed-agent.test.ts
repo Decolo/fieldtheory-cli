@@ -6,6 +6,7 @@ import path from 'node:path';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { rebuildArchiveStoreFromCaches } from '../src/archive-store.js';
 import { buildFeedIndex } from '../src/feed-db.js';
 import { buildIndex } from '../src/bookmarks-db.js';
 import { buildLikesIndex } from '../src/likes-db.js';
@@ -15,7 +16,7 @@ import { writeJson } from '../src/fs.js';
 const execFileAsync = promisify(execFile);
 
 async function withCliAgentData(
-  fn: (dir: string, origin: string) => Promise<void>,
+  fn: (dir: string, origin: string, requests: string[]) => Promise<void>,
   options: { favoriteStatuses?: number[]; bookmarkStatuses?: number[] } = {},
 ): Promise<void> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-cli-feed-agent-'));
@@ -23,6 +24,7 @@ async function withCliAgentData(
   process.env.FT_X_CLIENT_TRANSACTION_ID = 'test-transaction-id';
   const favoriteStatuses = [...(options.favoriteStatuses ?? [])];
   const bookmarkStatuses = [...(options.bookmarkStatuses ?? [])];
+  const requests: string[] = [];
 
   const server = http.createServer(async (req, res) => {
     const body = await new Promise<string>((resolve) => {
@@ -31,6 +33,7 @@ async function withCliAgentData(
       req.on('end', () => resolve(data));
     });
     const parsed = body ? JSON.parse(body) : {};
+    requests.push(req.url ?? '');
 
     if (req.url === '/embeddings') {
       const inputs = Array.isArray(parsed.input) ? parsed.input : [parsed.input];
@@ -125,7 +128,7 @@ async function withCliAgentData(
     await buildIndex({ force: true });
     await buildLikesIndex({ force: true });
     await buildFeedIndex({ force: true });
-    await fn(dir, `http://127.0.0.1:${address.port}`);
+    await fn(dir, `http://127.0.0.1:${address.port}`, requests);
   } finally {
     delete process.env.FT_DATA_DIR;
     delete process.env.FT_X_CLIENT_TRANSACTION_ID;
@@ -202,6 +205,75 @@ test('ft feed agent run prints a concise summary', async () => {
     assert.match(stdout, /Feed agent run:/);
     assert.match(stdout, /auto-liked: 1/);
     assert.match(stdout, /auto-bookmarked: 1/);
+  });
+});
+
+test('ft feed agent run stays idempotent when the unified archive already has like and bookmark attachments', async () => {
+  await withCliAgentData(async (dir, origin, requests) => {
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+
+    await writeFile(path.join(dir, 'bookmarks.jsonl'), `${JSON.stringify({
+      id: 'bm-shared',
+      tweetId: 'fd-1',
+      url: 'https://x.com/alice/status/fd-1',
+      text: 'AI agents for code review and code search are getting much better',
+      authorHandle: 'alice',
+      authorName: 'Alice',
+      postedAt: '2026-04-12T00:00:00Z',
+      bookmarkedAt: '2026-04-13T00:00:00Z',
+      syncedAt: '2026-04-13T00:00:00Z',
+      links: ['https://blog.example.com/agents'],
+      mediaObjects: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    })}\n`);
+    await writeFile(path.join(dir, 'likes.jsonl'), `${JSON.stringify({
+      id: 'lk-shared',
+      tweetId: 'fd-1',
+      url: 'https://x.com/alice/status/fd-1',
+      text: 'AI agents for code review and code search are getting much better',
+      authorHandle: 'alice',
+      authorName: 'Alice',
+      postedAt: '2026-04-12T00:00:00Z',
+      likedAt: '2026-04-13T00:00:00Z',
+      syncedAt: '2026-04-13T00:00:00Z',
+      links: ['https://blog.example.com/agents'],
+      mediaObjects: [],
+      tags: [],
+      ingestedVia: 'graphql',
+    })}\n`);
+    await writeJson(path.join(dir, 'bookmarks-meta.json'), { provider: 'twitter', schemaVersion: 1, totalBookmarks: 1 });
+    await writeJson(path.join(dir, 'likes-meta.json'), { provider: 'twitter', schemaVersion: 1, totalLikes: 1 });
+    await buildIndex({ force: true });
+    await buildLikesIndex({ force: true });
+    await rebuildArchiveStoreFromCaches({ forceIndex: true });
+
+    await writeFile(path.join(dir, 'bookmarks.jsonl'), '');
+    await writeFile(path.join(dir, 'likes.jsonl'), '');
+    await writeJson(path.join(dir, 'bookmarks-meta.json'), { provider: 'twitter', schemaVersion: 1, totalBookmarks: 0 });
+    await writeJson(path.join(dir, 'likes-meta.json'), { provider: 'twitter', schemaVersion: 1, totalLikes: 0 });
+
+    const { stdout } = await execFileAsync(tsx, [
+      'src/cli.ts', 'feed', 'agent', 'run',
+      '--max-pages', '0',
+      '--cookies', 'ct0-token', 'auth',
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        FT_DATA_DIR: dir,
+        FT_X_API_ORIGIN: origin,
+        FT_EMBEDDING_API_KEY: 'test-key',
+        FT_EMBEDDING_BASE_URL: origin,
+      },
+    });
+
+    assert.match(stdout, /Feed agent run:/);
+    assert.match(stdout, /consumed: 1/);
+    assert.match(stdout, /auto-liked: 0/);
+    assert.match(stdout, /auto-bookmarked: 0/);
+    assert.equal(requests.filter((url) => url.includes('/FavoriteTweet')).length, 0);
+    assert.equal(requests.filter((url) => url.includes('/CreateBookmark')).length, 0);
   });
 });
 

@@ -5,12 +5,14 @@ import { loadFeedPreferences } from './feed-preferences.js';
 import { scoreSemanticItem } from './feed-semantic-scorer.js';
 import { SemanticStore } from './semantic-store.js';
 import {
+  twitterArchiveCachePath,
   twitterBookmarksCachePath,
   twitterFeedAgentLogPath,
   twitterFeedAgentStatePath,
   twitterLikesCachePath,
 } from './paths.js';
 import type {
+  ArchiveItem,
   BookmarkRecord,
   FeedAgentItemState,
   FeedAgentLogEntry,
@@ -152,20 +154,62 @@ function actionErrorDetail(error: unknown): NonNullable<FeedAgentLogEntry['actio
   return { errorKind: 'unknown' };
 }
 
+interface FeedArchiveActionState {
+  likeSet: Set<string>;
+  bookmarkSet: Set<string>;
+}
+
+async function loadFeedArchiveActionState(): Promise<FeedArchiveActionState> {
+  if (await pathExists(twitterArchiveCachePath())) {
+    const archive = await readJsonLines<ArchiveItem>(twitterArchiveCachePath());
+    const likeSet = new Set<string>();
+    const bookmarkSet = new Set<string>();
+
+    for (const item of archive) {
+      addArchiveActionKeys(item, 'like', likeSet);
+      addArchiveActionKeys(item, 'bookmark', bookmarkSet);
+    }
+
+    return { likeSet, bookmarkSet };
+  }
+
+  const [likes, bookmarks] = await Promise.all([
+    readJsonLines<LikeRecord>(twitterLikesCachePath()),
+    readJsonLines<BookmarkRecord>(twitterBookmarksCachePath()),
+  ]);
+
+  return {
+    likeSet: new Set(likes.flatMap(recordActionKeys)),
+    bookmarkSet: new Set(bookmarks.flatMap(recordActionKeys)),
+  };
+}
+
+function addArchiveActionKeys(item: ArchiveItem, source: 'like' | 'bookmark', target: Set<string>): void {
+  const attachment = source === 'like' ? item.sourceAttachments.like : item.sourceAttachments.bookmark;
+  if (!attachment) return;
+  if (item.tweetId) target.add(item.tweetId);
+  if (item.id) target.add(item.id);
+  const sourceRecordId = typeof attachment.metadata?.sourceRecordId === 'string'
+    ? attachment.metadata.sourceRecordId
+    : null;
+  if (sourceRecordId) target.add(sourceRecordId);
+}
+
+function recordActionKeys(record: { id: string; tweetId: string }): string[] {
+  return record.id === record.tweetId ? [record.tweetId] : [record.tweetId, record.id];
+}
+
 export async function consumeFeedItems(items: FeedRecord[], options: FeedConsumeOptions = {}): Promise<FeedConsumeResult> {
   const startedAt = new Date().toISOString();
   const runId = `run-${startedAt.replace(/[-:.TZ]/g, '').slice(0, 14)}`;
   const dryRun = Boolean(options.dryRun);
   const likeThreshold = options.likeThreshold ?? DEFAULT_LIKE_THRESHOLD;
   const bookmarkThreshold = options.bookmarkThreshold ?? DEFAULT_BOOKMARK_THRESHOLD;
-  const [bookmarks, likes, state] = await Promise.all([
-    readJsonLines<BookmarkRecord>(twitterBookmarksCachePath()),
-    readJsonLines<LikeRecord>(twitterLikesCachePath()),
+  const [{ bookmarkSet, likeSet }, state] = await Promise.all([
+    loadFeedArchiveActionState(),
     loadState(),
   ]);
   const explicitPreferences = loadFeedPreferences();
-  const bookmarkSet = new Set(bookmarks.map((record) => record.tweetId ?? record.id));
-  const likeSet = new Set(likes.map((record) => record.tweetId ?? record.id));
   const candidateLimit = options.candidateLimit ?? items.length ?? 1;
   const candidates = sortCandidates(items, state).slice(0, Math.max(0, candidateLimit));
   const semanticStore = await SemanticStore.open();
