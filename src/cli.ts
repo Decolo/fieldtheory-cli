@@ -4,6 +4,7 @@ import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { getLikesStatusView, formatLikesStatus } from './likes-service.js';
 import { getFeedStatusView, formatFeedStatus } from './feed-service.js';
+import { getAccountTimelineStatusView, formatAccountTimelineStatus } from './account-timeline-service.js';
 import { formatFeedAgentLog, formatFeedAgentStatus, getFeedAgentStatusView, listFeedAgentLog, runFeedAgent } from './feed-agent.js';
 import { formatFeedDaemonStatus, getFeedDaemonState, startFeedDaemon, stopFeedDaemon } from './feed-daemon.js';
 import { addFeedPreference, formatFeedPreferences, loadFeedPreferences, removeFeedPreference } from './feed-preferences.js';
@@ -12,6 +13,7 @@ import { runTwitterOAuthFlow } from './xauth.js';
 import { syncBookmarksGraphQL, syncGaps } from './graphql-bookmarks.js';
 import { syncLikesGraphQL, type LikesSyncProgress } from './graphql-likes.js';
 import { syncFeedGraphQL, type FeedSyncProgress } from './graphql-feed.js';
+import { syncAccountTimelineGraphQL } from './graphql-account-timeline.js';
 import { bookmarkTweet, unlikeTweet, unbookmarkTweet } from './graphql-actions.js';
 import type { SyncProgress, GapFillProgress } from './graphql-bookmarks.js';
 import { fetchBookmarkMediaBatch } from './bookmark-media.js';
@@ -35,6 +37,7 @@ import {
   formatLikeSearchResults,
 } from './likes-db.js';
 import { listFeed, getFeedById } from './feed-db.js';
+import { listAccountTimeline, getAccountTimelineById } from './account-timeline-db.js';
 import { runHybridSearch } from './hybrid-search.js';
 import type { HybridSearchMode, HybridSearchResult, HybridSearchScope } from './search-types.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
@@ -54,12 +57,14 @@ import {
   isFirstRun,
   isFeedFirstRun,
   isLikesFirstRun,
+  twitterAccountTimelineIndexPath,
   twitterBookmarksIndexPath,
   twitterBackfillStatePath,
   twitterFeedIndexPath,
   twitterLikesIndexPath,
   mdDir,
 } from './paths.js';
+import { resolveTrackedAccount } from './account-registry.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { assertWebAssetsBuilt, startWebServer } from './web.js';
@@ -122,6 +127,9 @@ const FRIENDLY_STOP_REASONS: Record<string, string> = {
   'no new bookmarks (stale)': 'Sync complete \u2014 reached the end of new bookmarks.',
   'end of bookmarks': 'Sync complete \u2014 all bookmarks fetched.',
   'end of feed': 'Sync complete \u2014 all requested feed pages fetched.',
+  'end of timeline': 'Sync complete \u2014 reached the end of the account timeline.',
+  'no new tweets (stale)': 'Sync complete \u2014 no newer posts beyond your local archive.',
+  'limit reached': 'Sync complete \u2014 reached the requested item limit.',
   'no tweet entries found': 'Sync complete \u2014 no supported tweet entries were returned.',
   'max runtime reached': 'Paused after 30 minutes. Run again to continue.',
   'max pages reached': 'Paused after reaching page limit. Run again to continue.',
@@ -450,6 +458,27 @@ function requireFeedIndex(): boolean {
     return false;
   }
   return true;
+}
+
+async function requireTrackedAccount(handle: string): Promise<{ userId: string; currentHandle: string; name?: string } | null> {
+  const account = await resolveTrackedAccount(handle);
+  if (!account) {
+    console.log(`\n  No local archive found for ${handle}.\n\n  Run: ft accounts sync ${handle}\n`);
+    process.exitCode = 1;
+    return null;
+  }
+  return account;
+}
+
+async function requireAccountIndex(handle: string): Promise<{ userId: string; currentHandle: string; name?: string } | null> {
+  const account = await requireTrackedAccount(handle);
+  if (!account) return null;
+  if (!fs.existsSync(twitterAccountTimelineIndexPath(account.userId))) {
+    console.log(`\n  Account index not built yet.\n\n  Run: ft accounts sync @${account.currentHandle}\n`);
+    process.exitCode = 1;
+    return null;
+  }
+  return account;
 }
 
 /** Wrap an async action with graceful error handling. */
@@ -1573,6 +1602,124 @@ export function buildCli() {
       console.log(`Indexed ${result.recordCount} likes (${result.newRecords} new) → ${result.dbPath}`);
     }));
 
+  const resolveBrowserSessionOptions = (options: Record<string, unknown>) => {
+    let csrfToken: string | undefined;
+    let cookieHeader: string | undefined;
+    if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
+      csrfToken = String(options.cookies[0]);
+      const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+      const parts = [`ct0=${csrfToken}`];
+      if (authToken) parts.push(`auth_token=${authToken}`);
+      cookieHeader = parts.join('; ');
+    }
+
+    return {
+      browser: options.browser ? String(options.browser) : undefined,
+      csrfToken,
+      cookieHeader,
+      chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+      chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+      firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+    };
+  };
+
+  // ── accounts ──────────────────────────────────────────────────────────
+
+  const accounts = program
+    .command('accounts')
+    .description('Sync and browse one public X account timeline as a separate local archive');
+
+  accounts
+    .command('sync')
+    .description('Fetch one public account timeline into a separate local archive')
+    .argument('<handle>', 'Public X handle, with or without @')
+    .option('--limit <n>', 'Max tweets to fetch this run', (v: string) => Number(v), 50)
+    .option('--retain <value>', 'Retention window like 90d, 24h, or 180m', '90d')
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (handle: string, options) => {
+      ensureDataDir();
+      const result = await syncAccountTimelineGraphQL(handle, {
+        limit: Number(options.limit) || 50,
+        retain: String(options.retain ?? '90d'),
+        ...resolveBrowserSessionOptions(options),
+      });
+
+      console.log(`\n  ✓ synced @${result.targetHandle}`);
+      console.log(`  added: ${result.added}`);
+      console.log(`  pruned: ${result.pruned}`);
+      console.log(`  total: ${result.totalItems}`);
+      console.log(`  latest changed: ${result.latestChanged ? 'yes' : 'no'}`);
+      if (result.latestTweetId) console.log(`  latest tweet: ${result.latestTweetId}`);
+      console.log(`  ${friendlyStopReason(result.stopReason)}`);
+      console.log(`  ✓ Data: ${dataDir()}\n`);
+    }));
+
+  accounts
+    .command('status')
+    .description('Show one tracked account archive status')
+    .argument('<handle>', 'Tracked handle, with or without @')
+    .action(safe(async (handle: string) => {
+      const account = await requireTrackedAccount(handle);
+      if (!account) return;
+      console.log(formatAccountTimelineStatus(await getAccountTimelineStatusView(`@${account.currentHandle}`)));
+    }));
+
+  accounts
+    .command('list')
+    .description('List cached tweets for one tracked account')
+    .argument('<handle>', 'Tracked handle, with or without @')
+    .option('--limit <n>', 'Max results', (v: string) => Number(v), 30)
+    .option('--offset <n>', 'Offset into results', (v: string) => Number(v), 0)
+    .option('--json', 'JSON output')
+    .action(safe(async (handle: string, options) => {
+      const account = await requireAccountIndex(handle);
+      if (!account) return;
+      const items = await listAccountTimeline(account.userId, {
+        limit: Number(options.limit) || 30,
+        offset: Number(options.offset) || 0,
+      });
+      if (options.json) {
+        console.log(JSON.stringify(items, null, 2));
+        return;
+      }
+      for (const item of items) {
+        const summary = item.text.length > 120 ? `${item.text.slice(0, 117)}...` : item.text;
+        console.log(`${item.id}  ${item.authorHandle ? `@${item.authorHandle}` : '@?'}  ${(item.postedAt ?? item.syncedAt)?.slice(0, 10) ?? '?'}`);
+        console.log(`  ${summary}`);
+        console.log(`  ${item.url}`);
+        console.log();
+      }
+    }));
+
+  accounts
+    .command('show')
+    .description('Show one cached tracked-account tweet in detail')
+    .argument('<handle>', 'Tracked handle, with or without @')
+    .argument('<id>', 'Tweet id')
+    .option('--json', 'JSON output')
+    .action(safe(async (handle: string, id: string, options) => {
+      const account = await requireAccountIndex(handle);
+      if (!account) return;
+      const item = await getAccountTimelineById(account.userId, String(id));
+      if (!item) {
+        console.log(`  Account timeline item not found: ${String(id)}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (options.json) {
+        console.log(JSON.stringify(item, null, 2));
+        return;
+      }
+      console.log(`${item.id}  ${item.authorHandle ? `@${item.authorHandle}` : '@?'}  ${(item.postedAt ?? item.syncedAt)?.slice(0, 10) ?? '?'}`);
+      if (item.authorName) console.log(item.authorName);
+      console.log(item.text);
+      console.log(`\n${item.url}`);
+    }));
+
   // ── feed ───────────────────────────────────────────────────────────────
 
   const feed = program
@@ -1692,27 +1839,6 @@ export function buildCli() {
       console.log(`sortIndex: ${item.sortIndex ?? 'unknown'}  page: ${item.fetchPage ?? '?'}  position: ${item.fetchPosition ?? '?'}`);
     }));
 
-  const resolveFeedSessionOptions = (options: Record<string, unknown>) => {
-    let csrfToken: string | undefined;
-    let cookieHeader: string | undefined;
-    if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
-      csrfToken = String(options.cookies[0]);
-      const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
-      const parts = [`ct0=${csrfToken}`];
-      if (authToken) parts.push(`auth_token=${authToken}`);
-      cookieHeader = parts.join('; ');
-    }
-
-    return {
-      browser: options.browser ? String(options.browser) : undefined,
-      csrfToken,
-      cookieHeader,
-      chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
-      chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
-      firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
-    };
-  };
-
   const feedAgent = feed
     .command('agent')
     .description('Run autonomous feed liking/bookmarking and inspect its local history');
@@ -1733,7 +1859,7 @@ export function buildCli() {
     .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
     .action(safe(async (options) => {
       ensureDataDir();
-      const sessionOptions = resolveFeedSessionOptions(options);
+      const sessionOptions = resolveBrowserSessionOptions(options);
 
       const runOnce = async (): Promise<void> => {
         const result = await runFeedAgent({
@@ -1809,7 +1935,7 @@ export function buildCli() {
         likeThreshold: options.likeThreshold != null ? Number(options.likeThreshold) : undefined,
         bookmarkThreshold: options.bookmarkThreshold != null ? Number(options.bookmarkThreshold) : undefined,
         dryRun: Boolean(options.dryRun),
-        ...resolveFeedSessionOptions(options),
+        ...resolveBrowserSessionOptions(options),
       });
     }));
 

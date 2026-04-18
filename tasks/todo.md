@@ -1,3 +1,27 @@
+# 2026-04-19 single-account public timeline sync
+
+## Plan
+
+- [x] Unit 1: add public account lookup plus tracked-account timeline sync using the existing browser-session GraphQL path
+- [x] Unit 2: add per-account local cache, SQLite index, retention pruning, and local-first status/list/show services
+- [x] Unit 3: expose `ft accounts sync|status|list|show` as the first CLI surface for tracked public accounts
+- [x] Unit 4: update README/docs/plan status so the new archive family and retention posture are discoverable
+- [x] Verification: run targeted account-timeline tests plus a build
+- [x] Review: run structured review with subagents and address any findings
+
+## Review
+
+- Added a separate tracked-account archive family under `accounts/<user-id>/`, plus a local `accounts-registry.json` so read commands keep working after the first sync without requiring a live X lookup.
+- Added `src/graphql-account-timeline.ts` to resolve a handle via `UserByScreenName`, fetch `UserTweetsAndReplies`, preserve tweets authored by the target account including replies, merge by tweet id, and prune rows outside the `--retain` window during sync.
+- Added `src/account-timeline-db.ts`, `src/account-timeline.ts`, and `src/account-timeline-service.ts` so one account archive can rebuild its own SQLite index and support `status`, `list`, and `show` from local data only.
+- Extended `src/cli.ts` with `ft accounts sync <handle>`, `ft accounts status <handle>`, `ft accounts list <handle>`, and `ft accounts show <handle> <tweet-id>`, while reusing one shared browser-session option parser.
+- Added regression coverage in `tests/account-registry.test.ts`, `tests/graphql-account-timeline.test.ts`, `tests/account-timeline-db.test.ts`, `tests/account-timeline-service.test.ts`, and `tests/cli-accounts.test.ts`.
+- Review follow-up fixes:
+- `ft accounts status` no longer requires `timeline.db`; it reads local metadata/state directly as intended.
+- Timeline ordering now breaks same-second ties by tweet id, so `latestTweetId` and cache chronology stay stable.
+- Registry handle reassignment now removes stale ownership when a handle is later remembered for a different user id.
+- Added failure-path coverage for unknown accounts, missing indexes, missing tweet ids, invalid retention, auth failures, stale sync stops, and retention pruning.
+
 # 2026-04-15 x bookmark mutation 404 investigation
 
 ## Plan
