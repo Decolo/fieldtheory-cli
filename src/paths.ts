@@ -148,6 +148,38 @@ export function twitterAccountTimelineIndexPath(userId: string): string {
   return path.join(twitterAccountDir(userId), 'timeline.db');
 }
 
+export function twitterFollowingRootDir(): string {
+  return path.join(dataDir(), 'following');
+}
+
+export function twitterFollowingSnapshotPath(): string {
+  return path.join(twitterFollowingRootDir(), 'snapshot.jsonl');
+}
+
+export function twitterFollowingLabelsPath(): string {
+  return path.join(twitterFollowingRootDir(), 'labels.json');
+}
+
+export function twitterFollowingReviewResultsPath(): string {
+  return path.join(twitterFollowingRootDir(), 'review-results.jsonl');
+}
+
+export function twitterFollowingReviewStatePath(): string {
+  return path.join(twitterFollowingRootDir(), 'review-state.json');
+}
+
+export function twitterFollowingReviewIndexPath(): string {
+  return path.join(twitterFollowingRootDir(), 'review.db');
+}
+
+export function twitterFollowingAccountCacheDir(): string {
+  return path.join(twitterFollowingRootDir(), 'accounts');
+}
+
+export function twitterFollowingAccountCachePath(userId: string): string {
+  return path.join(twitterFollowingAccountCacheDir(), `${String(userId)}.json`);
+}
+
 export function preferencesPath(): string {
   return path.join(dataDir(), '.preferences');
 }

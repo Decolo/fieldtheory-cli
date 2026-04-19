@@ -54,6 +54,10 @@ export function xGraphqlOrigin(): string {
   return (process.env.FT_X_API_ORIGIN ?? 'https://x.com').replace(/\/+$/, '');
 }
 
+export function xApiOrigin(): string {
+  return (process.env.FT_X_REST_API_ORIGIN ?? 'https://api.x.com').replace(/\/+$/, '');
+}
+
 export function buildGraphqlUrl(queryId: string, operationName: string): string {
   return `${xGraphqlOrigin()}/i/api/graphql/${queryId}/${operationName}`;
 }

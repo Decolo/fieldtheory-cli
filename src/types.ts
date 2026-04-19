@@ -197,6 +197,89 @@ export interface AccountTimelineState {
   lastCursor?: string;
 }
 
+export type FollowedAccountState = 'active' | 'protected' | 'suspended' | 'unavailable' | 'unfollowed';
+
+export interface FollowedAccountSnapshot {
+  userId: string;
+  handle: string;
+  name?: string;
+  description?: string;
+  profileImageUrl?: string;
+  followersCount?: number;
+  followingCount?: number;
+  statusesCount?: number;
+  verified?: boolean;
+  protected?: boolean;
+  state: FollowedAccountState;
+  sourceUserId?: string;
+  lastPostedAt?: string | null;
+  lastSyncedAt: string;
+}
+
+export type AccountRelevanceLabelValue = 'valuable' | 'not-valuable' | 'neutral';
+
+export interface AccountRelevanceLabel {
+  targetUserId: string;
+  currentHandle: string;
+  value: AccountRelevanceLabelValue;
+  updatedAt: string;
+  note?: string;
+}
+
+export type AccountReviewStage = 'stage1' | 'stage2';
+export type AccountReviewDisposition = 'healthy' | 'candidate' | 'deferred' | 'unfollowed';
+export type AccountReviewReason = 'inactive' | 'low_engagement' | 'low_relevance' | 'uncertain';
+
+export interface AccountReviewEvidence {
+  inactivityDays?: number;
+  inactivityThresholdDays?: number;
+  followerCount?: number;
+  avgLikeCount?: number;
+  avgReplyCount?: number;
+  avgViewCount?: number;
+  label?: AccountRelevanceLabelValue;
+  fetchStatus?: 'cached' | 'fetched' | 'failed' | 'unavailable';
+  note?: string;
+}
+
+export interface AccountReviewResult {
+  targetUserId: string;
+  handle: string;
+  name?: string;
+  stage: AccountReviewStage;
+  disposition: AccountReviewDisposition;
+  primaryReason: AccountReviewReason;
+  score: number;
+  evidence: AccountReviewEvidence;
+  lastPostedAt?: string | null;
+  lastEvaluatedAt: string;
+}
+
+export interface FollowingReviewState {
+  provider: 'twitter';
+  schemaVersion: number;
+  sourceUserId?: string;
+  lastFollowingSyncAt?: string;
+  followingSnapshotComplete: boolean;
+  lastReviewRunAt?: string;
+  lastReviewCount: number;
+  totalFollowing: number;
+  candidateCount: number;
+  deepScannedUserIds: string[];
+  lastCursor?: string;
+}
+
+export interface FollowingAccountEvidenceCache {
+  targetUserId: string;
+  handle: string;
+  fetchedAt: string;
+  recordCount: number;
+  lastPostedAt?: string | null;
+  avgLikeCount?: number;
+  avgReplyCount?: number;
+  avgViewCount?: number;
+}
+
 export interface XOAuthTokenSet {
   access_token: string;
   refresh_token?: string;

@@ -7,13 +7,13 @@ import { promptText } from './prompt.js';
 
 const FRONTMATTER = `---
 name: fieldtheory
-description: Search the user's local X/Twitter bookmarks for content relevant to their current work. Trigger when the user mentions bookmarks, saved tweets, wants to find something they saved, or asks questions their bookmark history could answer.
+description: Search the user's local X/Twitter archives for content relevant to their current work. Trigger when the user mentions bookmarks, saved tweets, tracked account research, or asks questions their local X archive could answer.
 ---`;
 
 const BODY = `
-# Field Theory — Contextual Bookmark Search
+# Field Theory — Local X Archive Assistant
 
-Search the user's local X/Twitter bookmark archive for content relevant to the current task.
+Search the user's local X/Twitter archives for content relevant to the current task.
 
 ## When to trigger
 
@@ -21,6 +21,7 @@ Search the user's local X/Twitter bookmark archive for content relevant to the c
 - User asks to find something they bookmarked ("find that tweet about...")
 - User asks a question their bookmarks could answer ("what AI tools have I been looking at?")
 - User wants bookmark stats, patterns, or insights
+- User wants to research one tracked X account's viewpoints over time
 - Starting a task where the user's reading history adds context
 
 ## Workflow
@@ -52,6 +53,26 @@ Combine filters: \`ft bookmarks list --category tool --domain ai --limit 10\`
 - Don't dump raw output — summarize and connect findings to the user's current work
 - Cross-reference multiple queries to build a complete picture
 - Look for recurring authors, topic clusters, and connections between bookmarks
+
+## Account Research Workflow
+
+Use this when the user wants to study one tracked account's viewpoints, themes, or recurring claims over time.
+
+1. Confirm the account already has local data
+2. If not, tell the user to run \`ft accounts sync @handle\`
+3. Export the local archive for the requested date range:
+
+\`\`\`bash
+ft accounts export @handle --after YYYY-MM-DD --before YYYY-MM-DD
+\`\`\`
+
+4. Read the exported JSON
+5. Produce a concise markdown viewpoint map:
+   - main themes
+   - major viewpoints per theme
+   - 3-5 representative tweet links per theme
+
+Keep this local-first. Do not imply that \`ft\` itself performs the analysis.
 `;
 
 /** Full skill file with YAML frontmatter (for Claude Code commands). */

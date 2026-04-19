@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { buildCli } from '../src/cli.js';
@@ -190,5 +190,34 @@ test('ft accounts show exits non-zero when the tweet id is not in the local arch
     const { stdout, code } = await runCli(['accounts', 'show', '@elonmusk', '999'], dir);
     assert.equal(code, 1);
     assert.match(stdout, /Account timeline item not found: 999/);
+  });
+});
+
+test('ft accounts export prints JSON from the local archive', async () => {
+  await withAccountDataDir(async (dir) => {
+    const { stdout, code } = await runCli(
+      ['accounts', 'export', '@elonmusk', '--after', '2026-04-01', '--before', '2026-04-30'],
+      dir,
+    );
+    assert.equal(code, 0);
+    const payload = JSON.parse(stdout);
+    assert.equal(payload.account.handle, 'elonmusk');
+    assert.equal(payload.count, 1);
+    assert.equal(payload.items[0]?.tweetId, '1');
+  });
+});
+
+test('ft accounts export writes JSON to a file with --out', async () => {
+  await withAccountDataDir(async (dir) => {
+    const outputPath = path.join(dir, 'exports', 'elonmusk.json');
+    const { stdout, code } = await runCli(
+      ['accounts', 'export', '@elonmusk', '--out', outputPath],
+      dir,
+    );
+    assert.equal(code, 0);
+    assert.match(stdout, /Exported 1 tweets for @elonmusk/);
+    const payload = JSON.parse(await readFile(outputPath, 'utf8'));
+    assert.equal(payload.account.userId, '44196397');
+    assert.equal(payload.count, 1);
   });
 });
