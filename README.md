@@ -34,16 +34,22 @@ ft feed sync --max-pages 2
 # 4. Sync one public account into its own separate archive
 ft accounts sync @elonmusk --limit 50 --retain 90d
 
-# 5. Search bookmarks, likes, and feed
+# 5. Review followed accounts and search local archives
+ft accounts review --max-pages 1
+ft accounts label @somebody valuable
+ft accounts unfollow @somebody
+ft accounts export @elonmusk --after 2026-01-01 --before 2026-04-01 --out elonmusk.json
+
+# 6. Search bookmarks, likes, and feed
 ft bookmarks search "distributed systems"
 ft likes search "distributed systems"
 ft search-all "best practices on claude code"
 ft search-all "claude code" --mode action
 
-# 6. Trim old likes in throttled batches
+# 7. Trim old likes in throttled batches
 ft likes trim --keep 200 --batch-size 25 --pause-seconds 45
 
-# 7. Run the autonomous feed agent once, or start the recurring daemon
+# 8. Run the autonomous feed agent once, or start the recurring daemon
 ft feed agent run --max-pages 1
 ft feed daemon start --every 30m --candidate-limit 30 --max-pages 2
 ft feed semantic status
@@ -102,6 +108,10 @@ On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse you
 | `ft likes unlike <id>` | Unlike a post on X and update the local likes archive |
 | `ft likes trim` | Keep only the latest likes and unlike older posts on X in throttled batches |
 | `ft likes status` | Show likes archive status |
+| `ft accounts review` | Refresh your following list and surface conservative unfollow candidates |
+| `ft accounts label <handle> <value>` | Store a manual value label (`valuable`, `not-valuable`, `neutral`) for a reviewed account |
+| `ft accounts unfollow <handle>` | Unfollow one reviewed account on X and reconcile the local review cache |
+| `ft accounts export <handle>` | Export one tracked account archive as JSON for agent or research workflows |
 | `ft accounts status <handle>` | Show one tracked account archive status |
 | `ft accounts list <handle>` | Browse cached tweets for one tracked account |
 | `ft accounts show <handle> <id>` | Show one cached tracked-account tweet in detail |
@@ -195,6 +205,10 @@ ft feed daemon start --every 30m --candidate-limit 30 --max-pages 2
 
 `ft accounts sync` is explicit per account in v1. It stores data under a separate `accounts/<user-id>/` archive, prunes rows older than the `--retain` window during sync, and does not add tracked-account tweets into `ft search-all` yet.
 
+`ft accounts export` stays local-first. It reads one tracked account's existing local archive, filters by `--after` / `--before` in `YYYY-MM-DD` format, and emits JSON for downstream agent or research workflows. It does not perform sync or LLM analysis itself.
+
+`ft accounts review` uses a separate `following/` archive family. It refreshes your current following list, reuses manual labels and cached deep-scan evidence when present, and only recommends conservative unfollows after confirming inactivity with recent timeline evidence.
+
 ## Data
 
 All data is stored locally at `~/.ft-bookmarks/`:
@@ -216,6 +230,14 @@ All data is stored locally at `~/.ft-bookmarks/`:
       timeline.db          # SQLite index for one account timeline
       timeline-meta.json   # last sync summary, retention, latest tweet snapshot
       timeline-state.json  # sync checkpoint state for one account
+  following/
+    snapshot.jsonl         # latest following-list snapshot
+    labels.json           # manual value labels by followed account user id
+    review-results.jsonl  # latest scored review results
+    review-state.json     # review run and following-sync metadata
+    review.db             # SQLite index for followed-account review state
+    accounts/
+      <user-id>.json      # cached deep-scan evidence for reviewed accounts
   feed.jsonl              # raw Home timeline cache (tweet-only entries)
   feed.db                 # SQLite index for local feed browsing
   feed-meta.json          # feed sync metadata

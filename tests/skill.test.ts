@@ -24,6 +24,16 @@ describe('skill content', () => {
       assert.ok(content.includes('ft bookmarks list'));
       assert.ok(content.includes('ft bookmarks stats'));
       assert.ok(content.includes('ft bookmarks show'));
+      assert.ok(content.includes('ft accounts export'));
+      assert.ok(content.includes('ft accounts sync'));
+    }
+  });
+
+  it('skill content includes local-first account research guidance', () => {
+    for (const content of [skillWithFrontmatter(), skillBody()]) {
+      assert.ok(content.includes('Account Research Workflow'));
+      assert.ok(content.includes('Produce a concise markdown viewpoint map'));
+      assert.ok(content.includes('Do not imply that `ft` itself performs the analysis.'));
     }
   });
 

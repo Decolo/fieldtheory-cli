@@ -47,6 +47,13 @@ export interface RemoteTweetActionResult {
   attempts: number;
 }
 
+export interface RemoteFollowActionResult {
+  targetUserId: string;
+  operation: 'unfollow';
+  responseKey: string;
+  attempts: number;
+}
+
 const ACTION_RETRY_BACKOFF_MS = [1000, 3000] as const;
 
 const UNLIKE_MUTATION: MutationSpec = {
@@ -75,6 +82,13 @@ const BOOKMARK_MUTATION: MutationSpec = {
   operationName: 'CreateBookmark',
   responseKey: 'tweet_bookmark_put',
   failureLabel: 'Failed to create bookmark',
+};
+
+const UNFOLLOW_MUTATION: MutationSpec = {
+  queryId: process.env.FT_X_UNFOLLOW_QUERY_ID ?? 'vf4QO8QqZ8wZ-0Hj8Vd9pA',
+  operationName: process.env.FT_X_UNFOLLOW_OPERATION ?? 'UnfollowUser',
+  responseKey: 'unfollow_user',
+  failureLabel: 'Failed to unfollow account',
 };
 
 function shouldRetryActionFailure(error: RemoteTweetActionError): boolean {
@@ -280,4 +294,67 @@ export async function bookmarkTweet(
   options: XSessionOptions = {},
 ): Promise<RemoteTweetActionResult> {
   return runMutation(BOOKMARK_MUTATION, tweetId, options);
+}
+
+export async function unfollowAccount(
+  targetUserId: string,
+  options: XSessionOptions = {},
+): Promise<RemoteFollowActionResult> {
+  const session = resolveXSessionAuth(options);
+  const request = {
+    method: 'POST',
+    headers: buildXGraphqlHeaders(session),
+    body: JSON.stringify({
+      variables: { user_id: targetUserId },
+      queryId: UNFOLLOW_MUTATION.queryId,
+    }),
+  } satisfies RequestInit;
+
+  let lastError: RemoteTweetActionError | undefined;
+
+  for (let attempt = 0; attempt <= ACTION_RETRY_BACKOFF_MS.length; attempt += 1) {
+    try {
+      const response = await fetchXResource(buildGraphqlUrl(UNFOLLOW_MUTATION.queryId, UNFOLLOW_MUTATION.operationName), request);
+      if (!response.ok) {
+        const text = await response.text();
+        lastError = buildHttpActionError(UNFOLLOW_MUTATION, response.status, text, attempt + 1);
+        if (shouldRetryActionFailure(lastError) && attempt < ACTION_RETRY_BACKOFF_MS.length) {
+          await waitForRetry(attempt);
+          continue;
+        }
+        throw lastError;
+      }
+
+      const json = await response.json() as Record<string, any>;
+      const successValue = json?.data?.[UNFOLLOW_MUTATION.responseKey]
+        ?? json?.data?.unfollowUser
+        ?? json?.data?.destroy_friendship;
+      if (successValue !== 'Done' && successValue !== true) {
+        throw new RemoteTweetActionError(
+          `${UNFOLLOW_MUTATION.failureLabel} after ${attempt + 1} attempt${attempt === 0 ? '' : 's'}.\n` +
+          `Response: ${JSON.stringify(json).slice(0, 300)}`,
+          { attempts: attempt + 1, retryable: false },
+        );
+      }
+
+      return {
+        targetUserId,
+        operation: 'unfollow',
+        responseKey: UNFOLLOW_MUTATION.responseKey,
+        attempts: attempt + 1,
+      };
+    } catch (error) {
+      lastError = normalizeActionError(UNFOLLOW_MUTATION, error, attempt + 1);
+      if (shouldRetryActionFailure(lastError) && attempt < ACTION_RETRY_BACKOFF_MS.length) {
+        await waitForRetry(attempt);
+        continue;
+      }
+      throw lastError;
+    }
+  }
+
+  throw lastError ?? new RemoteTweetActionError(`${UNFOLLOW_MUTATION.failureLabel} after exhausting retries.`, {
+    attempts: ACTION_RETRY_BACKOFF_MS.length + 1,
+    retryable: true,
+  });
 }

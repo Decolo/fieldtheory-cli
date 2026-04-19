@@ -6,6 +6,18 @@ export function parseTimestampMs(value?: string | null): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+export function normalizeDateInput(value: string, label = 'date'): string {
+  const normalized = String(value).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    throw new Error(`Invalid ${label} date: "${value}". Use YYYY-MM-DD.`);
+  }
+  const parsed = Date.parse(`${normalized}T00:00:00.000Z`);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString().slice(0, 10) !== normalized) {
+    throw new Error(`Invalid ${label} date: "${value}". Use YYYY-MM-DD.`);
+  }
+  return normalized;
+}
+
 export function toIsoDate(value?: string | null): string | null {
   const ms = parseTimestampMs(value);
   if (ms == null) return null;

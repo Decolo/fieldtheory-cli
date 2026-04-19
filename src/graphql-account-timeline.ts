@@ -18,10 +18,10 @@ import type {
   QuotedTweetSnapshot,
 } from './types.js';
 
-const USER_BY_SCREEN_NAME_QUERY_ID = '1VOOyvKkiI3FMmkeDNxM9A';
+const USER_BY_SCREEN_NAME_QUERY_ID = 'IGgvgiOx4QZndDHuD3x9TQ';
 const USER_BY_SCREEN_NAME_OPERATION = 'UserByScreenName';
-const USER_TWEETS_AND_REPLIES_QUERY_ID = 'OAx9yEcW3JA9bPo63pcYlA';
-const USER_TWEETS_AND_REPLIES_OPERATION = 'UserTweetsAndReplies';
+const USER_TWEETS_AND_REPLIES_QUERY_ID = '6fWQaBPK51aGyC_VC7t9GQ';
+const USER_TWEETS_AND_REPLIES_OPERATION = 'UserTweets';
 const STALE_PAGE_LIMIT = 1;
 
 const USER_LOOKUP_FEATURES = {

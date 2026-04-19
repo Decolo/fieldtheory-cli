@@ -4,6 +4,7 @@ import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service
 import { getLikesStatusView, formatLikesStatus } from './likes-service.js';
 import { getFeedStatusView, formatFeedStatus } from './feed-service.js';
 import { getAccountTimelineStatusView, formatAccountTimelineStatus } from './account-timeline-service.js';
+import { formatAccountReviewResults } from './account-review-service.js';
 import { formatFeedAgentLog, formatFeedAgentStatus, getFeedAgentStatusView, listFeedAgentLog, runFeedAgent } from './feed-agent.js';
 import { formatFeedDaemonStatus, getFeedDaemonState, startFeedDaemon, stopFeedDaemon } from './feed-daemon.js';
 import { addFeedPreference, formatFeedPreferences, loadFeedPreferences, removeFeedPreference } from './feed-preferences.js';
@@ -11,7 +12,8 @@ import { formatSemanticStatus, getSemanticStatusView, rebuildSemanticIndex } fro
 import { syncLikesGraphQL, type LikesSyncProgress } from './graphql-likes.js';
 import { syncFeedGraphQL, type FeedSyncProgress } from './graphql-feed.js';
 import { syncAccountTimelineGraphQL } from './graphql-account-timeline.js';
-import { bookmarkTweet, unlikeTweet, unbookmarkTweet } from './graphql-actions.js';
+import { bookmarkTweet, unfollowAccount, unlikeTweet, unbookmarkTweet } from './graphql-actions.js';
+import { syncFollowingSnapshot } from './graphql-following.js';
 import { fetchBookmarkRecordViaSyndication, type SyncProgress, type GapFillProgress } from './graphql-bookmarks.js';
 import { syncBookmarks } from './bookmark-sync.js';
 import { repairBookmarks } from './bookmark-repair.js';
@@ -37,6 +39,9 @@ import {
 } from './likes-db.js';
 import { listFeed, getFeedById } from './feed-db.js';
 import { listAccountTimeline, getAccountTimelineById } from './account-timeline-db.js';
+import { exportAccountTimeline } from './account-export.js';
+import { buildFollowingReviewIndex, getFollowingReviewItemByHandle } from './following-review-db.js';
+import { runAccountReview } from './account-review.js';
 import { runHybridSearch } from './hybrid-search.js';
 import type { HybridSearchMode, HybridSearchResult, HybridSearchScope } from './search-types.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
@@ -49,6 +54,7 @@ import { lintMd, fixLintIssues } from './md-lint.js';
 import { exportBookmarks } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
 import { removeBookmarkFromArchive, removeLikeFromArchive, upsertBookmarkInArchive } from './archive-actions.js';
+import { reconcileUnfollowedAccount } from './following-actions.js';
 import { listBrowserIds } from './browsers.js';
 import {
   dataDir,
@@ -64,6 +70,7 @@ import {
 } from './paths.js';
 import { resolveTrackedAccount } from './account-registry.js';
 import { PromptCancelledError, promptText } from './prompt.js';
+import { resolveFollowedAccountFromCache, setFollowingLabel } from './following-review-state.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { assertWebAssetsBuilt, startWebServer } from './web.js';
 import { trimLikes } from './likes-trim.js';
@@ -310,6 +317,15 @@ function logo(): string {
      \x1b[2m\u2514${'\u2500'.repeat(innerW)}\u2518\x1b[0m`;
 }
 
+function shouldSuppressPreActionOutput(argv: string[]): boolean {
+  const args = argv.slice(2);
+  const commandPath = args.filter((arg) => !arg.startsWith('-')).slice(0, 2).join(' ');
+  if (commandPath === 'skill show') return true;
+  if (commandPath === 'accounts export' && !args.includes('--out')) return true;
+  if (args.includes('--json')) return true;
+  return false;
+}
+
 export function showWelcome(): void {
   console.log(logo());
   console.log(`
@@ -494,6 +510,20 @@ async function requireAccountIndex(handle: string): Promise<{ userId: string; cu
   return account;
 }
 
+async function requireFollowedAccount(handle: string): Promise<{ userId: string; handle: string; name?: string } | null> {
+  const account = await resolveFollowedAccountFromCache(handle);
+  if (!account) {
+    console.log(`\n  No reviewed follow cache found for ${handle}.\n\n  Run: ft accounts review\n`);
+    process.exitCode = 1;
+    return null;
+  }
+  return {
+    userId: account.userId,
+    handle: account.handle,
+    name: account.name,
+  };
+}
+
 /** Wrap an async action with graceful error handling. */
 function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promise<void> {
   return async (...args: any[]) => {
@@ -651,6 +681,7 @@ export function buildCli() {
     .version(getLocalVersion())
     .showHelpAfterError()
     .hook('preAction', () => {
+      if (shouldSuppressPreActionOutput(process.argv)) return;
       console.log(logo());
       showWhatsNew();
     });
@@ -1600,7 +1631,7 @@ export function buildCli() {
 
   const accounts = program
     .command('accounts')
-    .description('Sync and browse one public X account timeline as a separate local archive');
+    .description('Review followed accounts and manage tracked public-account timelines');
 
   accounts
     .command('sync')
@@ -1629,6 +1660,125 @@ export function buildCli() {
       if (result.latestTweetId) console.log(`  latest tweet: ${result.latestTweetId}`);
       console.log(`  ${friendlyStopReason(result.stopReason)}`);
       console.log(`  ✓ Data: ${dataDir()}\n`);
+    }));
+
+  accounts
+    .command('review')
+    .description('Review your current following list and surface conservative unfollow candidates')
+    .option('--max-pages <n>', 'Max following-list pages to fetch', (v: string) => Number(v), 1)
+    .option('--max-results <n>', 'Max accounts per following page', (v: string) => Number(v), 200)
+    .option('--max-stage2 <n>', 'Max accounts to deep-scan before scoring', (v: string) => Number(v), 25)
+    .option('--timeline-page-size <n>', 'How many recent posts to inspect per deep-scanned account', (v: string) => Number(v), 20)
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (options) => {
+      ensureDataDir();
+      const session = resolveBrowserSessionOptions(options);
+      const sync = await syncFollowingSnapshot({
+        maxPages: Number(options.maxPages) || 1,
+        maxResults: Number(options.maxResults) || 200,
+        ...session,
+      });
+      const review = await runAccountReview({
+        maxStage2Accounts: Number(options.maxStage2) || 25,
+        timelinePageSize: Number(options.timelinePageSize) || 20,
+        ...session,
+      });
+      await buildFollowingReviewIndex({ force: true });
+
+      console.log(`\n  Reviewed ${review.totalAccounts} followed accounts`);
+      if (!sync.isComplete) {
+        console.log(`  Note: following snapshot is partial (${review.totalAccounts} fetched; more pages remain)`);
+      }
+      console.log(`  Deep scanned: ${review.stage2Count}`);
+      console.log(`  Candidates: ${review.candidateCount}\n`);
+      console.log(formatAccountReviewResults(review.results));
+      console.log();
+    }));
+
+  accounts
+    .command('label')
+    .description('Store a manual value label for a followed account in the review cache')
+    .argument('<handle>', 'Followed account handle, with or without @')
+    .argument('<value>', 'Label: valuable, not-valuable, or neutral')
+    .action(safe(async (handle: string, value: string) => {
+      const account = await requireFollowedAccount(handle);
+      if (!account) return;
+      const normalized = String(value).trim().toLowerCase();
+      if (!['valuable', 'not-valuable', 'neutral'].includes(normalized)) {
+        throw new Error('Invalid label. Use: valuable, not-valuable, or neutral.');
+      }
+      const label = await setFollowingLabel({
+        targetUserId: account.userId,
+        handle: account.handle,
+        value: normalized as 'valuable' | 'not-valuable' | 'neutral',
+      });
+      await buildFollowingReviewIndex({ force: true });
+      console.log(`\n  Saved label for @${account.handle}: ${label.value}\n`);
+    }));
+
+  accounts
+    .command('unfollow')
+    .description('Unfollow one reviewed account on X and reconcile the local review cache')
+    .argument('<handle>', 'Followed account handle, with or without @')
+    .option('--yes', 'Skip confirmation prompt', false)
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (handle: string, options) => {
+      const account = await requireFollowedAccount(handle);
+      if (!account) return;
+      const reviewItem = await getFollowingReviewItemByHandle(account.handle);
+      if (!options.yes) {
+        console.log(`\n  About to unfollow @${account.handle}${account.name ? ` (${account.name})` : ''}`);
+        if (reviewItem?.primaryReason) {
+          console.log(`  Latest review reason: ${reviewItem.primaryReason}`);
+        }
+        const answer = await promptText('  Continue? (y/N) ', { output: process.stdout });
+        if (answer.kind === 'interrupt') {
+          throw new PromptCancelledError('Cancelled. Unfollow aborted.', 130);
+        }
+        if (answer.kind !== 'answer' || answer.value.toLowerCase() !== 'y') {
+          console.log('  Aborted.');
+          return;
+        }
+      }
+
+      await unfollowAccount(account.userId, resolveBrowserSessionOptions(options));
+      const reconciled = await reconcileUnfollowedAccount(account.userId);
+      console.log(`\n  Unfollowed on X: @${account.handle}`);
+      console.log(`  Local review cache: ${reconciled.removedFromSnapshot ? 'updated' : 'no matching snapshot row'}`);
+      console.log(`  Remaining followed accounts in cache: ${reconciled.totalFollowing}\n`);
+    }));
+
+  accounts
+    .command('export')
+    .description('Export cached tweets for one tracked account as JSON')
+    .argument('<handle>', 'Tracked handle, with or without @')
+    .option('--after <date>', 'Posted after (YYYY-MM-DD)')
+    .option('--before <date>', 'Posted before (YYYY-MM-DD)')
+    .option('--out <path>', 'Write JSON to this file instead of stdout')
+    .action(safe(async (handle: string, options) => {
+      const payload = await exportAccountTimeline(handle, {
+        after: options.after ? String(options.after) : undefined,
+        before: options.before ? String(options.before) : undefined,
+      });
+      const json = JSON.stringify(payload, null, 2);
+      if (!options.out) {
+        console.log(json);
+        return;
+      }
+
+      const outputPath = path.resolve(String(options.out));
+      fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+      fs.writeFileSync(outputPath, `${json}\n`);
+      console.log(`\n  Exported ${payload.count} tweets for @${payload.account.handle}`);
+      console.log(`  Output: ${outputPath}\n`);
     }));
 
   accounts
