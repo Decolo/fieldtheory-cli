@@ -55,6 +55,52 @@ test('buildCli help includes feed command group', () => {
   assert.match(help, /\bfeed\b/);
 });
 
+test('buildCli feed group no longer exposes agent or prefs commands', () => {
+  const cli = buildCli();
+  const feed = cli.commands.find((command) => command.name() === 'feed');
+  assert.ok(feed);
+  assert.equal(feed.commands.some((command) => command.name() === 'agent'), false);
+  assert.equal(feed.commands.some((command) => command.name() === 'prefs'), false);
+  assert.equal(feed.commands.some((command) => command.name() === 'daemon'), true);
+  assert.equal(feed.commands.some((command) => command.name() === 'semantic'), true);
+});
+
+test('feed daemon help reflects collection-only behavior', () => {
+  const cli = buildCli();
+  const feed = cli.commands.find((command) => command.name() === 'feed');
+  assert.ok(feed);
+  const daemon = feed.commands.find((command) => command.name() === 'daemon');
+  assert.ok(daemon);
+  assert.match(daemon.helpInformation(), /collection/i);
+  assert.doesNotMatch(daemon.helpInformation(), /consume/i);
+
+  const start = daemon.commands.find((command) => command.name() === 'start');
+  assert.ok(start);
+  const help = start.helpInformation();
+  assert.match(help, /--every <interval>/);
+  assert.doesNotMatch(help, /like threshold|bookmark threshold|dry-run|candidate-limit/i);
+});
+
+test('removed feed agent and prefs commands fail as unknown commands', async () => {
+  const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+
+  await assert.rejects(
+    execFileAsync(tsx, ['src/cli.ts', 'feed', 'agent', 'run'], {
+      cwd: process.cwd(),
+      env: process.env,
+    }),
+    /unknown command ['"]agent['"]/i,
+  );
+
+  await assert.rejects(
+    execFileAsync(tsx, ['src/cli.ts', 'feed', 'prefs', 'show'], {
+      cwd: process.cwd(),
+      env: process.env,
+    }),
+    /unknown command ['"]prefs['"]/i,
+  );
+});
+
 test('ft feed status prints feed-specific summary', async () => {
   await withFeedDataDir(async (dir) => {
     const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');

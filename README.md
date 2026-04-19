@@ -49,12 +49,9 @@ ft search-all "claude code" --mode action
 # 7. Trim old likes in throttled batches
 ft likes trim --keep 200 --batch-size 25 --pause-seconds 45
 
-# 8. Run the autonomous feed agent once, or start the recurring daemon
-ft feed agent run --max-pages 1
-ft feed daemon start --every 30m --candidate-limit 30 --max-pages 2
+# 8. Start the recurring feed collection daemon and inspect semantic coverage
+ft feed daemon start --every 30m --max-pages 2
 ft feed semantic status
-ft feed prefs like author @alice
-ft feed prefs bookmark topic "ai agents"
 
 # 8. Explore bookmarks
 ft bookmarks viz
@@ -78,19 +75,12 @@ On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse you
 | `ft likes sync` | Download and sync liked posts into a separate local archive |
 | `ft accounts sync <handle>` | Download one public account timeline into a separate local archive |
 | `ft feed sync` | Fetch Home timeline tweets into a local read-only feed archive |
-| `ft feed agent run` | Sync a bounded amount of feed data, score candidates, and auto-like/bookmark matches once |
-| `ft feed daemon start --every <interval>` | Run recurring feed refresh plus immediate consumption on one timer |
+| `ft feed daemon start --every <interval>` | Run recurring feed refresh plus local semantic indexing on one timer |
 | `ft feed daemon status` | Show daemon status and the last structured tick summary |
 | `ft feed daemon stop` | Stop the recurring daemon process |
 | `ft feed daemon log` | Show daemon state plus the redacted append-only log location |
 | `ft feed semantic status` | Show embedding provider config and local vector coverage |
-| `ft feed semantic rebuild` | Rebuild vectors for feed, likes, bookmarks, and topic preferences |
-| `ft feed prefs show` | Show explicit feed preference rules |
-| `ft feed prefs like <kind> <value>` | Prefer an author, domain, or topic for auto-like |
-| `ft feed prefs dislike <kind> <value>` | Avoid an author, domain, or topic for auto-like |
-| `ft feed prefs bookmark <kind> <value>` | Prefer an author, domain, or topic for auto-bookmark |
-| `ft feed prefs avoid-bookmark <kind> <value>` | Avoid an author, domain, or topic for auto-bookmark |
-| `ft feed prefs remove <mode> <kind> <value>` | Remove one explicit feed preference rule |
+| `ft feed semantic rebuild` | Rebuild vectors for feed, likes, and bookmarks |
 
 ### Search and browse
 
@@ -118,8 +108,6 @@ On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse you
 | `ft feed list` | Browse cached Home timeline tweets with local paging |
 | `ft feed show <id>` | Show one cached feed item in detail |
 | `ft feed status` | Show feed archive status |
-| `ft feed agent status` | Show cumulative autonomous-agent totals and local artifact paths |
-| `ft feed agent log` | Show recent autonomous likes, bookmarks, and skips |
 | `ft web` | Launch a local web UI for hybrid search plus archive browsing |
 | `ft bookmarks sample <category>` | Random sample from a category |
 | `ft bookmarks stats` | Top authors, languages, date range |
@@ -193,14 +181,14 @@ Works with Claude Code, Codex, or any agent with shell access.
 # Sync and classify every morning
 0 7 * * * ft bookmarks sync --classify
 
-# Refresh feed and auto-like/bookmark matching items every 30 minutes via cron
-*/30 * * * * ft feed agent run --max-pages 1
+# Refresh feed and local semantic retrieval state every 30 minutes via cron
+*/30 * * * * ft feed sync --max-pages 1 && ft feed semantic rebuild
 
 # Refresh one tracked public account every 20 minutes and keep only the last 30 days locally
 */20 * * * * ft accounts sync @elonmusk --limit 50 --retain 30d
 
 # Or keep one daemon process alive
-ft feed daemon start --every 30m --candidate-limit 30 --max-pages 2
+ft feed daemon start --every 30m --max-pages 2
 ```
 
 `ft accounts sync` is explicit per account in v1. It stores data under a separate `accounts/<user-id>/` archive, prunes rows older than the `--retain` window during sync, and does not add tracked-account tweets into `ft search-all` yet.
@@ -244,8 +232,6 @@ All data is stored locally at `~/.ft-bookmarks/`:
   feed-state.json
   archive.jsonl           # canonical unified archive cache with source attachments
   archive.db              # unified archive index for web/search/assistant consumers
-  feed-agent-state.json   # cumulative autonomous action state and idempotency
-  feed-agent-log.jsonl    # append-only autonomous action log
   feed-daemon-state.json  # recurring daemon status and last tick summary
   feed-daemon.log         # append-only daemon loop log
   semantic.lance/         # local LanceDB vector store for semantic feed retrieval
@@ -280,16 +266,13 @@ ft likes trim --keep 200 --batch-size 25 --pause-seconds 45
 
 The command recomputes the trim set from your current local archive on each run, so it is safe to resume after an interruption. It unlikes older posts on X in batches, rewrites `likes.jsonl`, updates `likes-meta.json`, and rebuilds `likes.db` once per batch.
 
-## Autonomous feed actions
+## Feed collection daemon
 
-Use `feed agent run` for a one-shot pass, or `feed daemon start` for the recurring fetch-then-consume loop:
+Use `feed daemon start` when you want recurring Home timeline collection plus local semantic-index maintenance:
 
 ```bash
-# One real run
-ft feed agent run --max-pages 1
-
 # Keep running every 30 minutes
-ft feed daemon start --every 30m --candidate-limit 30 --max-pages 2
+ft feed daemon start --every 30m --max-pages 2
 
 # Inspect or stop the daemon
 ft feed daemon status
@@ -298,20 +281,6 @@ ft feed daemon stop
 # Inspect or rebuild semantic retrieval state
 ft feed semantic status
 ft feed semantic rebuild
-
-# Inspect cumulative state and recent actions
-ft feed agent status
-ft feed agent log --limit 20
-
-# Show or edit explicit preferences
-ft feed prefs show
-ft feed prefs like author @alice
-ft feed prefs dislike domain example.com
-ft feed prefs bookmark topic "ai agents"
-ft feed prefs avoid-bookmark domain example.com
-
-# Preview what would happen without sending remote actions
-ft feed agent run --max-pages 1 --dry-run
 ```
 
 Semantic feed matching is embedding-based. By default the CLI is preconfigured for Aliyun Bailian `text-embedding-v4` through its OpenAI-compatible embeddings API.
@@ -325,15 +294,13 @@ export FT_EMBEDDING_PROVIDER=aliyun-bailian
 export FT_EMBEDDING_BATCH_SIZE=32
 ```
 
-The daemon runs one simple loop: refresh feed, hand just the newly seen items to the consumer, then persist a tick summary. The consumer combines explicit rules with locally inferred history from existing likes and bookmarks. Explicit rules win. Each run can:
+The daemon runs one simple loop: refresh feed, rebuild semantic vectors for newly seen feed items, then persist a tick summary. Each run can:
 
 - sync a bounded amount of fresh feed data
-- score newly discovered feed items against explicit rules plus historical likes and bookmarks via local vector search
-- auto-like and auto-bookmark strong matches on X
-- avoid replaying already-successful actions for the same tweet/action pair
-- write durable local state and append-only logs for later inspection
+- refresh local semantic retrieval coverage for newly collected feed items
+- write durable local collection/indexing state and append-only logs for later inspection
 
-`ft feed daemon status` shows whether the recurring loop is alive plus the last stage, outcome, error kind, duration, and redacted summary for the most recent tick. `feed-daemon.log` remains an append-only local artifact for stage-by-stage follow-up, but transport secrets are redacted before errors reach status/log output. `ft feed semantic status` shows whether embeddings are configured and how much local vector coverage exists. `ft feed agent status` and `ft feed agent log` show cumulative action history, including when an action needed multiple attempts before succeeding or finally failed. `--dry-run` is useful when tuning thresholds and explicit preferences before letting the system act live.
+`ft feed daemon status` shows whether the recurring loop is alive plus the last stage, outcome, error kind, duration, and redacted summary for the most recent tick. `feed-daemon.log` remains an append-only local artifact for stage-by-stage follow-up, but transport secrets are redacted before errors reach status/log output. `ft feed semantic status` shows whether embeddings are configured and how much local vector coverage exists.
 
 ## Hybrid search
 
@@ -411,7 +378,7 @@ Session sync extracts cookies from your browser's local database. Use `ft bookma
 
 **The feed archive sync uses the same browser-authenticated X web session path.** In v1 it is read-only, CLI-first, and stores tweet-only Home timeline entries for local browsing.
 
-**Remote unlike, unbookmark, likes trim, and feed-agent auto-actions use the same browser-authenticated X web session path.** On success, the CLI also reconciles the matching local cached records and rebuilds the relevant search index. Single-item remote write actions now retry only transient failures (`network`, `429`, `5xx`) with bounded backoff before surfacing an error.
+**Remote unlike, unbookmark, and likes trim use the same browser-authenticated X web session path.** On success, the CLI also reconciles the matching local cached records and rebuilds the relevant search index. Single-item remote write actions now retry only transient failures (`network`, `429`, `5xx`) with bounded backoff before surfacing an error.
 
 ## License
 

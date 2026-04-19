@@ -92,24 +92,12 @@ export function isFeedFirstRun(): boolean {
   return !fs.existsSync(twitterFeedCachePath());
 }
 
-export function twitterFeedAgentStatePath(): string {
-  return path.join(dataDir(), 'feed-agent-state.json');
-}
-
-export function twitterFeedAgentLogPath(): string {
-  return path.join(dataDir(), 'feed-agent-log.jsonl');
-}
-
 export function twitterFeedDaemonStatePath(): string {
   return path.join(dataDir(), 'feed-daemon-state.json');
 }
 
 export function twitterFeedDaemonLogPath(): string {
   return path.join(dataDir(), 'feed-daemon.log');
-}
-
-export function twitterFeedPrefsPath(): string {
-  return path.join(dataDir(), 'feed-prefs.json');
 }
 
 export function twitterSemanticStorePath(): string {
