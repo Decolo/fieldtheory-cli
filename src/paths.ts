@@ -80,6 +80,18 @@ export function twitterFeedIndexPath(): string {
   return path.join(dataDir(), 'feed.db');
 }
 
+export function twitterFeedContextRootDir(): string {
+  return path.join(dataDir(), 'feed-context');
+}
+
+export function twitterFeedContextBundlePath(rootFeedTweetId: string): string {
+  return path.join(twitterFeedContextRootDir(), `${String(rootFeedTweetId)}.json`);
+}
+
+export function twitterFeedContextStatePath(): string {
+  return path.join(twitterFeedContextRootDir(), 'state.json');
+}
+
 export function twitterArchiveCachePath(): string {
   return path.join(dataDir(), 'archive.jsonl');
 }

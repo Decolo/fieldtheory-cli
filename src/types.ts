@@ -322,6 +322,71 @@ export interface FeedBackfillState {
   lastCursor?: string;
 }
 
+export type FeedConversationTargetKind = 'feed_tweet' | 'quoted_tweet';
+export type FeedConversationFetchOutcome = 'success' | 'partial' | 'unavailable' | 'unsupported';
+
+export interface FeedConversationReply {
+  id: string;
+  tweetId: string;
+  url: string;
+  text: string;
+  authorHandle?: string;
+  authorName?: string;
+  authorProfileImageUrl?: string;
+  author?: BookmarkAuthorSnapshot;
+  postedAt?: string | null;
+  syncedAt: string;
+  conversationId?: string;
+  inReplyToStatusId?: string;
+  inReplyToUserId?: string;
+  quotedStatusId?: string;
+  quotedTweet?: QuotedTweetSnapshot;
+  language?: string;
+  sourceApp?: string;
+  possiblySensitive?: boolean;
+  engagement?: BookmarkEngagementSnapshot;
+  media?: string[];
+  mediaObjects?: BookmarkMediaObject[];
+  links?: string[];
+  tags?: string[];
+  ingestedVia?: 'graphql';
+}
+
+export interface FeedConversationBundle {
+  schemaVersion: number;
+  rootFeedTweetId: string;
+  rootFeedItemId: string;
+  conversationTweetId: string;
+  conversationId: string;
+  targetKind: FeedConversationTargetKind;
+  targetUrl?: string;
+  fetchedAt: string;
+  outcome: FeedConversationFetchOutcome;
+  unavailableReason?: string;
+  summary?: string;
+  replies: FeedConversationReply[];
+}
+
+export interface FeedConversationFetchState {
+  rootFeedTweetId: string;
+  rootFeedItemId: string;
+  conversationTweetId?: string;
+  conversationId?: string;
+  targetKind?: FeedConversationTargetKind;
+  lastFetchedAt?: string;
+  outcome?: FeedConversationFetchOutcome;
+  replyCount: number;
+  unavailableReason?: string;
+  summary?: string;
+}
+
+export interface FeedConversationStoreState {
+  provider: 'twitter';
+  schemaVersion: number;
+  updatedAt?: string;
+  records: Record<string, FeedConversationFetchState>;
+}
+
 export type FeedDaemonStage = 'fetch' | 'semantic' | 'tick';
 export type FeedDaemonOutcome = 'success' | 'error';
 export type FeedDaemonErrorKind =

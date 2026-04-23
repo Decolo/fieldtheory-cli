@@ -2,7 +2,7 @@
 import { Command } from 'commander';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { getLikesStatusView, formatLikesStatus } from './likes-service.js';
-import { getFeedStatusView, formatFeedStatus } from './feed-service.js';
+import { formatFeedConversationSummary, getFeedStatusView, formatFeedStatus } from './feed-service.js';
 import { getAccountTimelineStatusView, formatAccountTimelineStatus } from './account-timeline-service.js';
 import { formatAccountReviewResults } from './account-review-service.js';
 import { formatFeedDaemonStatus, getFeedDaemonState, startFeedDaemon, stopFeedDaemon } from './feed-daemon.js';
@@ -10,6 +10,7 @@ import { formatSemanticStatus, getSemanticStatusView, rebuildSemanticIndex } fro
 import { syncLikesGraphQL, type LikesSyncProgress } from './graphql-likes.js';
 import { syncFeedGraphQL, type FeedSyncProgress } from './graphql-feed.js';
 import { syncAccountTimelineGraphQL } from './graphql-account-timeline.js';
+import { syncFeedConversationContext } from './feed-context.js';
 import { bookmarkTweet, unfollowAccount, unlikeTweet, unbookmarkTweet } from './graphql-actions.js';
 import { syncFollowingSnapshot } from './graphql-following.js';
 import { fetchBookmarkRecordViaSyndication, type SyncProgress, type GapFillProgress } from './graphql-bookmarks.js';
@@ -69,6 +70,7 @@ import {
 import { resolveTrackedAccount } from './account-registry.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { resolveFollowedAccountFromCache, setFollowingLabel } from './following-review-state.js';
+import { readFeedConversationBundle } from './feed-context-store.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { assertWebAssetsBuilt, startWebServer } from './web.js';
 import { trimLikes } from './likes-trim.js';
@@ -1949,8 +1951,12 @@ export function buildCli() {
         process.exitCode = 1;
         return;
       }
+      const context = await readFeedConversationBundle(item.tweetId);
       if (options.json) {
-        console.log(JSON.stringify(item, null, 2));
+        console.log(JSON.stringify({
+          ...item,
+          conversationContext: context ?? undefined,
+        }, null, 2));
         return;
       }
       console.log(`${item.id}  ${item.authorHandle ? `@${item.authorHandle}` : '@?'}  ${(item.postedAt ?? item.syncedAt)?.slice(0, 10) ?? '?'}`);
@@ -1958,6 +1964,41 @@ export function buildCli() {
       console.log(item.text);
       console.log(`\n${item.url}`);
       console.log(`sortIndex: ${item.sortIndex ?? 'unknown'}  page: ${item.fetchPage ?? '?'}  position: ${item.fetchPosition ?? '?'}`);
+      console.log();
+      console.log(formatFeedConversationSummary(context).join('\n'));
+    }));
+
+  const feedContext = feed
+    .command('context')
+    .description('Collect and inspect conversation context for cached feed items');
+
+  feedContext
+    .command('sync')
+    .description('Fetch replies/comments for recent cached feed items')
+    .option('--limit <n>', 'How many recent feed items to expand', (v: string) => Number(v), 10)
+    .option('--tweet-id <id>', 'Only collect context for one cached feed item')
+    .option('--max-replies <n>', 'Maximum replies/comments to store per feed item', (v: string) => Number(v), 40)
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (options) => {
+      if (!requireFeedData()) return;
+      ensureDataDir();
+      const result = await syncFeedConversationContext({
+        limit: options.tweetId ? undefined : (Number(options.limit) || 10),
+        tweetId: options.tweetId ? String(options.tweetId) : undefined,
+        maxReplies: Number(options.maxReplies) || 40,
+        ...resolveBrowserSessionOptions(options),
+      });
+
+      console.log('Feed context sync');
+      console.log(`  requested: ${result.requested}`);
+      console.log(`  stored: ${result.stored}`);
+      console.log(`  skipped: ${result.skipped}`);
+      console.log(`  unavailable: ${result.unavailable}`);
+      console.log(`  replies stored: ${result.totalReplies}`);
     }));
 
   const feedDaemon = feed

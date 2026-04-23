@@ -1,7 +1,7 @@
 ---
 title: feat: Add conversation-context collection for feed items
 type: feat
-status: active
+status: completed
 date: 2026-04-20
 origin: docs/brainstorms/2026-04-19-x-feed-collection-reset-requirements.md
 ---
@@ -118,7 +118,7 @@ ft feed show <id>
 
 ## Implementation Units
 
-- [ ] **Unit 1: Add conversation-context data model and local sidecar storage**
+- [x] **Unit 1: Add conversation-context data model and local sidecar storage**
 
 **Goal:** Introduce a durable local dataset for reply/comment context keyed to feed items without mutating the base feed archive contract.
 
@@ -154,7 +154,7 @@ ft feed show <id>
 **Verification:**
 - Local conversation context can be stored, reloaded, and queried without touching `feed.jsonl` or `feed.db`.
 
-- [ ] **Unit 2: Add X conversation fetch + normalization primitives**
+- [x] **Unit 2: Add X conversation fetch + normalization primitives**
 
 **Goal:** Fetch replies/comments for one conversation target through the existing browser-session X integration and normalize them into stable local snapshots.
 
@@ -191,7 +191,7 @@ ft feed show <id>
 **Verification:**
 - A fixture-backed conversation fetch can retrieve and normalize replies/comments without inventing a second auth model for the repo.
 
-- [ ] **Unit 3: Add explicit `ft feed context sync` orchestration**
+- [x] **Unit 3: Add explicit `ft feed context sync` orchestration**
 
 **Goal:** Expose a bounded, deterministic CLI workflow for collecting conversation context from existing local feed items.
 
@@ -226,7 +226,7 @@ ft feed show <id>
 **Verification:**
 - Operators can expand local feed items into conversation-aware local data with one explicit CLI command and no hidden live-agent behavior.
 
-- [ ] **Unit 4: Surface collected context in local inspection flows**
+- [x] **Unit 4: Surface collected context in local inspection flows**
 
 **Goal:** Make conversation context inspectable from the CLI so the feature is useful before any later skill consumes it.
 
@@ -262,4 +262,3 @@ ft feed show <id>
 - **CLI contract:** grows by one explicit collection surface instead of making base feed sync heavier or less predictable.
 - **Future skill work:** materially easier, because local conversation evidence becomes available without asking the skill to hit X live.
 - **Runtime risk:** isolated to one explicit context-fetch path with bounded candidate selection and fixture-backed contract tests.
-

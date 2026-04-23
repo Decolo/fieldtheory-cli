@@ -62,7 +62,7 @@ export function buildGraphqlUrl(queryId: string, operationName: string): string 
   return `${xGraphqlOrigin()}/i/api/graphql/${queryId}/${operationName}`;
 }
 
-export function buildXGraphqlHeaders(session: XSessionAuth): Record<string, string> {
+export function buildXGraphqlHeaders(session: XSessionAuth, options: { referer?: string } = {}): Record<string, string> {
   const origin = xGraphqlOrigin();
   const headers: Record<string, string> = {
     authorization: `Bearer ${X_PUBLIC_BEARER}`,
@@ -74,7 +74,7 @@ export function buildXGraphqlHeaders(session: XSessionAuth): Record<string, stri
     accept: '*/*',
     'accept-language': 'en-US,en;q=0.9',
     origin,
-    referer: `${origin}/home`,
+    referer: options.referer ?? `${origin}/home`,
     'user-agent': CHROME_UA,
     cookie: session.cookieHeader ?? `ct0=${session.csrfToken}`,
   };
