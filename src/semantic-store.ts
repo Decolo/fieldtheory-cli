@@ -1,11 +1,8 @@
 import * as lancedb from '@lancedb/lancedb';
 import type { Connection, Table } from '@lancedb/lancedb';
 import type {
-  FeedPreferenceActionKind,
-  FeedPreferenceDisposition,
   SemanticDocumentRow,
   SemanticDocumentSource,
-  SemanticPreferenceRow,
   SemanticSearchHit,
 } from './types.js';
 import { twitterSemanticStorePath } from './paths.js';
@@ -69,19 +66,6 @@ function normalizeDocumentRow(row: Record<string, unknown>): SemanticDocumentRow
   };
 }
 
-function normalizePreferenceRow(row: Record<string, unknown>): SemanticPreferenceRow {
-  return {
-    id: String(row.id),
-    action: row.action as FeedPreferenceActionKind,
-    disposition: row.disposition as FeedPreferenceDisposition,
-    rawText: String(row.rawText),
-    normalizedText: String(row.normalizedText),
-    textHash: String(row.textHash),
-    embeddingVersion: String(row.embeddingVersion),
-    vector: normalizeVector(row.vector),
-  };
-}
-
 export class SemanticStore {
   private readonly connection: Connection;
 
@@ -102,13 +86,13 @@ export class SemanticStore {
     return this.connection.tableNames();
   }
 
-  private async openTableIfExists(name: 'documents' | 'preferences'): Promise<Table | null> {
+  private async openTableIfExists(name: 'documents'): Promise<Table | null> {
     const tables = await this.connection.tableNames();
     if (!tables.includes(name)) return null;
     return this.connection.openTable(name);
   }
 
-  private async ensureTable(name: 'documents' | 'preferences', rows: Array<Record<string, unknown>>): Promise<Table | null> {
+  private async ensureTable(name: 'documents', rows: Array<Record<string, unknown>>): Promise<Table | null> {
     if (rows.length === 0) {
       return this.openTableIfExists(name);
     }
@@ -124,17 +108,6 @@ export class SemanticStore {
     const rows = await table.query().where(idsWhereClause(ids)).toArray();
     return new Map(rows.map((row: Record<string, unknown>) => {
       const normalized = normalizeDocumentRow(row);
-      return [normalized.id, normalized];
-    }));
-  }
-
-  async getPreferencesByIds(ids: string[]): Promise<Map<string, SemanticPreferenceRow>> {
-    if (ids.length === 0) return new Map();
-    const table = await this.openTableIfExists('preferences');
-    if (!table) return new Map();
-    const rows = await table.query().where(idsWhereClause(ids)).toArray();
-    return new Map(rows.map((row: Record<string, unknown>) => {
-      const normalized = normalizePreferenceRow(row);
       return [normalized.id, normalized];
     }));
   }
@@ -161,35 +134,6 @@ export class SemanticStore {
     }))), { mode: 'append' });
   }
 
-  async upsertPreferences(rows: SemanticPreferenceRow[]): Promise<void> {
-    const table = await this.ensureTable('preferences', toRecordArray(rows));
-    if (!table || rows.length === 0) return;
-    const ids = rows.map((row) => row.id);
-    const existing = await this.getPreferencesByIds(ids);
-    const changed = rows.filter((row) => {
-      const current = existing.get(row.id);
-      return !current
-        || current.textHash !== row.textHash
-        || current.embeddingVersion !== row.embeddingVersion;
-    });
-    if (changed.length === 0) return;
-    const changedIds = changed.map((row) => row.id);
-    if (changedIds.length > 0 && existing.size > 0) {
-      await table.delete(idsWhereClause(changedIds));
-    }
-    await table.add(toRecordArray(changed.map((row) => ({
-      ...row,
-      vector: toUnitVector(row.vector),
-    }))), { mode: 'append' });
-  }
-
-  async deletePreferenceIds(ids: string[]): Promise<void> {
-    if (ids.length === 0) return;
-    const table = await this.openTableIfExists('preferences');
-    if (!table) return;
-    await table.delete(idsWhereClause(ids));
-  }
-
   async deleteDocumentIds(ids: string[]): Promise<void> {
     if (ids.length === 0) return;
     const table = await this.openTableIfExists('documents');
@@ -202,13 +146,6 @@ export class SemanticStore {
     if (!table) return [];
     const rows = await table.query().where(`source = ${quoteSql(source)}`).toArray();
     return rows.map((row: Record<string, unknown>) => normalizeDocumentRow(row));
-  }
-
-  async listPreferences(): Promise<SemanticPreferenceRow[]> {
-    const table = await this.openTableIfExists('preferences');
-    if (!table) return [];
-    const rows = await table.query().toArray();
-    return rows.map((row: Record<string, unknown>) => normalizePreferenceRow(row));
   }
 
   async searchDocuments(vector: number[], source: SemanticDocumentSource, limit = 5): Promise<SemanticSearchHit[]> {
@@ -233,45 +170,9 @@ export class SemanticStore {
     });
   }
 
-  async searchPreferences(
-    vector: number[],
-    action: FeedPreferenceActionKind,
-    disposition: FeedPreferenceDisposition,
-    limit = 5,
-  ): Promise<SemanticSearchHit[]> {
-    const table = await this.openTableIfExists('preferences');
-    if (!table) return [];
-    const rows = await table
-      .vectorSearch(toUnitVector(vector))
-      .distanceType('cosine')
-      .column('vector')
-      .where(`action = ${quoteSql(action)} AND disposition = ${quoteSql(disposition)}`)
-      .limit(limit)
-      .toArray();
-    return rows.map((row: Record<string, unknown>) => {
-      const normalized = normalizePreferenceRow(row);
-      const distance = Number(row._distance ?? 0);
-      return {
-        id: normalized.id,
-        distance,
-        score: distanceToScore(distance),
-        row: normalized,
-      };
-    });
-  }
-
   async countDocumentsBySource(source: SemanticDocumentSource): Promise<number> {
     const table = await this.openTableIfExists('documents');
     if (!table) return 0;
     return table.countRows(`source = ${quoteSql(source)}`);
-  }
-
-  async countPreferences(
-    action: FeedPreferenceActionKind,
-    disposition: FeedPreferenceDisposition,
-  ): Promise<number> {
-    const table = await this.openTableIfExists('preferences');
-    if (!table) return 0;
-    return table.countRows(`action = ${quoteSql(action)} AND disposition = ${quoteSql(disposition)}`);
   }
 }

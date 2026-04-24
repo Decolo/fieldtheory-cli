@@ -1,27 +1,41 @@
 import process from 'node:process';
 import { appendLine, pathExists, readJson, writeJson } from './fs.js';
 import { EmbeddingConfigError, EmbeddingProviderError } from './embeddings.js';
-import { consumeFeedItems } from './feed-consumer.js';
 import { fetchFeedItems } from './feed-fetcher.js';
-import { RemoteTweetActionError } from './graphql-actions.js';
 import { syncSemanticIndexForRun } from './semantic-indexer.js';
 import { twitterFeedDaemonLogPath, twitterFeedDaemonStatePath } from './paths.js';
 import type { FeedDaemonErrorKind, FeedDaemonLastTick, FeedDaemonStage, FeedDaemonState } from './types.js';
 import { XRequestError, sanitizeSensitiveText, type XSessionOptions } from './x-graphql.js';
 
-const FEED_DAEMON_SCHEMA_VERSION = 1;
+const FEED_DAEMON_SCHEMA_VERSION = 2;
 
 export interface FeedDaemonRunOptions extends XSessionOptions {
   everyMs: number;
   maxPages?: number;
-  candidateLimit?: number;
-  likeThreshold?: number;
-  bookmarkThreshold?: number;
-  dryRun?: boolean;
 }
 
 function defaultState(): FeedDaemonState {
   return { schemaVersion: FEED_DAEMON_SCHEMA_VERSION };
+}
+
+function normalizeFeedDaemonStage(stage: string | undefined): FeedDaemonStage {
+  if (stage === 'fetch' || stage === 'semantic' || stage === 'tick') return stage;
+  return 'tick';
+}
+
+function normalizeFeedDaemonState(state: FeedDaemonState): FeedDaemonState {
+  const normalizedLastTick = state.lastTick
+    ? {
+        ...state.lastTick,
+        stage: normalizeFeedDaemonStage(state.lastTick.stage),
+      }
+    : undefined;
+
+  return {
+    ...state,
+    schemaVersion: FEED_DAEMON_SCHEMA_VERSION,
+    lastTick: normalizedLastTick,
+  };
 }
 
 function formatLogValue(value: string | number | boolean): string {
@@ -52,12 +66,6 @@ function summarizeError(error: unknown): { kind: FeedDaemonErrorKind; summary: s
   if (error instanceof EmbeddingProviderError) {
     return { kind: 'semantic', summary: error.message };
   }
-  if (error instanceof RemoteTweetActionError) {
-    if (error.status === 401 || error.status === 403) return { kind: 'auth', summary: sanitizeSensitiveText(error.message) };
-    if (error.status === 429) return { kind: 'rate_limit', summary: sanitizeSensitiveText(error.message) };
-    if (typeof error.status === 'number' && error.status >= 500) return { kind: 'upstream', summary: sanitizeSensitiveText(error.message) };
-    return { kind: 'action', summary: sanitizeSensitiveText(error.message) };
-  }
   const message = sanitizeSensitiveText(error instanceof Error ? error.message : String(error));
   return { kind: 'unknown', summary: message || 'Unknown daemon error.' };
 }
@@ -72,10 +80,7 @@ function buildLastTick(input: {
   summary?: string;
   fetchAdded?: number;
   fetchTotalItems?: number;
-  consumed?: number;
-  liked?: number;
-  bookmarked?: number;
-  failed?: number;
+  indexedItems?: number;
 }): FeedDaemonLastTick {
   return {
     tickId: input.tickId,
@@ -88,20 +93,22 @@ function buildLastTick(input: {
     durationMs: Math.max(0, Date.parse(input.finishedAt) - Date.parse(input.startedAt)),
     fetchAdded: input.fetchAdded,
     fetchTotalItems: input.fetchTotalItems,
-    consumed: input.consumed,
-    liked: input.liked,
-    bookmarked: input.bookmarked,
-    failed: input.failed,
+    indexedItems: input.indexedItems,
   };
 }
 
 export async function getFeedDaemonState(): Promise<FeedDaemonState> {
   if (!(await pathExists(twitterFeedDaemonStatePath()))) return defaultState();
-  return readJson<FeedDaemonState>(twitterFeedDaemonStatePath());
+  const persisted = await readJson<FeedDaemonState>(twitterFeedDaemonStatePath());
+  const normalized = normalizeFeedDaemonState(persisted);
+  if (JSON.stringify(normalized) !== JSON.stringify(persisted)) {
+    await writeJson(twitterFeedDaemonStatePath(), normalized);
+  }
+  return normalized;
 }
 
 async function updateDaemonState(patch: Partial<FeedDaemonState>): Promise<FeedDaemonState> {
-  const state = { ...(await getFeedDaemonState()), ...patch };
+  const state = normalizeFeedDaemonState({ ...(await getFeedDaemonState()), ...patch } as FeedDaemonState);
   await writeJson(twitterFeedDaemonStatePath(), state);
   return state;
 }
@@ -149,10 +156,7 @@ export async function formatFeedDaemonStatus(): Promise<string> {
     `  last tick start: ${state.lastTickStartedAt ?? 'never'}`,
     `  last tick finish: ${state.lastTickFinishedAt ?? 'never'}`,
     `  last fetch added: ${state.lastFetchAdded ?? 0}`,
-    `  last consumed: ${state.lastConsumed ?? 0}`,
-    `  last auto-liked: ${state.lastLiked ?? 0}`,
-    `  last auto-bookmarked: ${state.lastBookmarked ?? 0}`,
-    `  last failed: ${state.lastFailed ?? 0}`,
+    `  last indexed items: ${state.lastIndexedItems ?? 0}`,
     `  last stage: ${lastTick?.stage ?? 'unknown'}`,
     `  last outcome: ${lastTick?.outcome ?? 'unknown'}`,
     `  last error kind: ${lastTick?.errorKind ?? 'none'}`,
@@ -178,6 +182,7 @@ export async function startFeedDaemon(options: FeedDaemonRunOptions): Promise<vo
   }
 
   await updateDaemonState({
+    schemaVersion: FEED_DAEMON_SCHEMA_VERSION,
     pid: process.pid,
     startedAt: new Date().toISOString(),
     intervalMs: options.everyMs,
@@ -208,9 +213,6 @@ export async function startFeedDaemon(options: FeedDaemonRunOptions): Promise<vo
       await syncSemanticIndexForRun(fetched.newItems);
       await writeDaemonLog({ event: 'semantic_ok', tick_id: tickId, items: fetched.newItems.length });
 
-      currentStage = 'consume';
-      await writeDaemonLog({ event: 'consume_start', tick_id: tickId, items: fetched.newItems.length });
-      const consumed = await consumeFeedItems(fetched.newItems, options);
       const tickFinishedAt = new Date().toISOString();
       const lastTick = buildLastTick({
         tickId,
@@ -221,33 +223,16 @@ export async function startFeedDaemon(options: FeedDaemonRunOptions): Promise<vo
         summary: 'Feed daemon tick completed successfully.',
         fetchAdded: fetched.added,
         fetchTotalItems: fetched.totalItems,
-        consumed: consumed.evaluated,
-        liked: consumed.liked,
-        bookmarked: consumed.bookmarked,
-        failed: consumed.failed,
+        indexedItems: fetched.newItems.length,
       });
       await updateDaemonState({
         lastTickFinishedAt: tickFinishedAt,
         lastFetchAdded: fetched.added,
         lastFetchTotalItems: fetched.totalItems,
-        lastConsumed: consumed.evaluated,
-        lastLiked: consumed.liked,
-        lastBookmarked: consumed.bookmarked,
-        lastFailed: consumed.failed,
+        lastIndexedItems: fetched.newItems.length,
         lastError: undefined,
         lastTick,
       });
-      await writeDaemonLog(
-        {
-          event: 'consume_ok',
-          tick_id: tickId,
-          consumed: consumed.evaluated,
-          liked: consumed.liked,
-          bookmarked: consumed.bookmarked,
-          failed: consumed.failed,
-          action_retries: consumed.actionRetries,
-        },
-      );
       await writeDaemonLog({
         event: 'tick_finish',
         tick_id: tickId,

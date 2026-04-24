@@ -322,49 +322,72 @@ export interface FeedBackfillState {
   lastCursor?: string;
 }
 
-export interface FeedAgentItemState {
+export type FeedConversationTargetKind = 'feed_tweet' | 'quoted_tweet';
+export type FeedConversationFetchOutcome = 'success' | 'partial' | 'unavailable' | 'unsupported';
+
+export interface FeedConversationReply {
+  id: string;
   tweetId: string;
-  lastEvaluatedAt?: string;
-  lastRunId?: string;
-  lastLikeScore?: number;
-  lastBookmarkScore?: number;
-  likedAt?: string;
-  bookmarkedAt?: string;
+  url: string;
+  text: string;
+  authorHandle?: string;
+  authorName?: string;
+  authorProfileImageUrl?: string;
+  author?: BookmarkAuthorSnapshot;
+  postedAt?: string | null;
+  syncedAt: string;
+  conversationId?: string;
+  inReplyToStatusId?: string;
+  inReplyToUserId?: string;
+  quotedStatusId?: string;
+  quotedTweet?: QuotedTweetSnapshot;
+  language?: string;
+  sourceApp?: string;
+  possiblySensitive?: boolean;
+  engagement?: BookmarkEngagementSnapshot;
+  media?: string[];
+  mediaObjects?: BookmarkMediaObject[];
+  links?: string[];
+  tags?: string[];
+  ingestedVia?: 'graphql';
 }
 
-export interface FeedAgentState {
+export interface FeedConversationBundle {
+  schemaVersion: number;
+  rootFeedTweetId: string;
+  rootFeedItemId: string;
+  conversationTweetId: string;
+  conversationId: string;
+  targetKind: FeedConversationTargetKind;
+  targetUrl?: string;
+  fetchedAt: string;
+  outcome: FeedConversationFetchOutcome;
+  unavailableReason?: string;
+  summary?: string;
+  replies: FeedConversationReply[];
+}
+
+export interface FeedConversationFetchState {
+  rootFeedTweetId: string;
+  rootFeedItemId: string;
+  conversationTweetId?: string;
+  conversationId?: string;
+  targetKind?: FeedConversationTargetKind;
+  lastFetchedAt?: string;
+  outcome?: FeedConversationFetchOutcome;
+  replyCount: number;
+  unavailableReason?: string;
+  summary?: string;
+}
+
+export interface FeedConversationStoreState {
   provider: 'twitter';
   schemaVersion: number;
-  lastRunAt?: string;
-  lastRunId?: string;
-  totalRuns: number;
-  totalEvaluated: number;
-  totalLiked: number;
-  totalBookmarked: number;
-  items: Record<string, FeedAgentItemState>;
+  updatedAt?: string;
+  records: Record<string, FeedConversationFetchState>;
 }
 
-export type FeedPreferenceTargetKind = 'author' | 'domain' | 'topic';
-export type FeedPreferenceActionKind = 'like' | 'bookmark';
-export type FeedPreferenceDisposition = 'prefer' | 'avoid';
-
-export interface FeedPreferenceRule {
-  kind: FeedPreferenceTargetKind;
-  value: string;
-  createdAt: string;
-}
-
-export interface FeedPreferenceBucket {
-  prefer: FeedPreferenceRule[];
-  avoid: FeedPreferenceRule[];
-}
-
-export interface FeedPreferences {
-  like: FeedPreferenceBucket;
-  bookmark: FeedPreferenceBucket;
-}
-
-export type FeedDaemonStage = 'fetch' | 'semantic' | 'consume' | 'tick';
+export type FeedDaemonStage = 'fetch' | 'semantic' | 'tick';
 export type FeedDaemonOutcome = 'success' | 'error';
 export type FeedDaemonErrorKind =
   | 'network'
@@ -372,7 +395,6 @@ export type FeedDaemonErrorKind =
   | 'rate_limit'
   | 'upstream'
   | 'semantic'
-  | 'action'
   | 'config'
   | 'unknown';
 
@@ -387,10 +409,7 @@ export interface FeedDaemonLastTick {
   durationMs: number;
   fetchAdded?: number;
   fetchTotalItems?: number;
-  consumed?: number;
-  liked?: number;
-  bookmarked?: number;
-  failed?: number;
+  indexedItems?: number;
 }
 
 export interface FeedDaemonState {
@@ -401,42 +420,10 @@ export interface FeedDaemonState {
   lastTickFinishedAt?: string;
   lastFetchAdded?: number;
   lastFetchTotalItems?: number;
-  lastConsumed?: number;
-  lastLiked?: number;
-  lastBookmarked?: number;
-  lastFailed?: number;
+  lastIndexedItems?: number;
   lastError?: string;
   intervalMs?: number;
   lastTick?: FeedDaemonLastTick;
-}
-
-export interface FeedAgentLogEntry {
-  runId: string;
-  timestamp: string;
-  tweetId: string;
-  authorHandle?: string;
-  url: string;
-  decision: 'skip' | 'like' | 'bookmark' | 'like+bookmark' | 'dry-run' | 'error';
-  likeScore: number;
-  bookmarkScore: number;
-  actions: {
-    like: 'applied' | 'already-done' | 'skipped' | 'planned' | 'failed';
-    bookmark: 'applied' | 'already-done' | 'skipped' | 'planned' | 'failed';
-  };
-  actionDetails?: {
-    like?: {
-      attempts?: number;
-      retryable?: boolean;
-      errorKind?: 'network' | 'auth' | 'rate_limit' | 'upstream' | 'unknown';
-    };
-    bookmark?: {
-      attempts?: number;
-      retryable?: boolean;
-      errorKind?: 'network' | 'auth' | 'rate_limit' | 'upstream' | 'unknown';
-    };
-  };
-  reasons: string[];
-  error?: string;
 }
 
 export type EmbeddingProviderName = 'aliyun-bailian' | 'openai-compatible';
@@ -452,12 +439,6 @@ export interface SemanticMeta {
   updatedAt: string;
   lastFullRebuildAt?: string;
   documents: Record<SemanticDocumentSource, number>;
-  preferences: {
-    likePrefer: number;
-    likeAvoid: number;
-    bookmarkPrefer: number;
-    bookmarkAvoid: number;
-  };
 }
 
 export interface SemanticDocumentRow {
@@ -474,20 +455,9 @@ export interface SemanticDocumentRow {
   vector: number[];
 }
 
-export interface SemanticPreferenceRow {
-  id: string;
-  action: FeedPreferenceActionKind;
-  disposition: FeedPreferenceDisposition;
-  rawText: string;
-  normalizedText: string;
-  textHash: string;
-  embeddingVersion: string;
-  vector: number[];
-}
-
 export interface SemanticSearchHit {
   id: string;
   distance: number;
   score: number;
-  row: SemanticDocumentRow | SemanticPreferenceRow;
+  row: SemanticDocumentRow;
 }

@@ -2,16 +2,15 @@
 import { Command } from 'commander';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { getLikesStatusView, formatLikesStatus } from './likes-service.js';
-import { getFeedStatusView, formatFeedStatus } from './feed-service.js';
+import { formatFeedConversationSummary, getFeedStatusView, formatFeedStatus } from './feed-service.js';
 import { getAccountTimelineStatusView, formatAccountTimelineStatus } from './account-timeline-service.js';
 import { formatAccountReviewResults } from './account-review-service.js';
-import { formatFeedAgentLog, formatFeedAgentStatus, getFeedAgentStatusView, listFeedAgentLog, runFeedAgent } from './feed-agent.js';
 import { formatFeedDaemonStatus, getFeedDaemonState, startFeedDaemon, stopFeedDaemon } from './feed-daemon.js';
-import { addFeedPreference, formatFeedPreferences, loadFeedPreferences, removeFeedPreference } from './feed-preferences.js';
 import { formatSemanticStatus, getSemanticStatusView, rebuildSemanticIndex } from './semantic-indexer.js';
 import { syncLikesGraphQL, type LikesSyncProgress } from './graphql-likes.js';
 import { syncFeedGraphQL, type FeedSyncProgress } from './graphql-feed.js';
 import { syncAccountTimelineGraphQL } from './graphql-account-timeline.js';
+import { syncFeedConversationContext } from './feed-context.js';
 import { bookmarkTweet, unfollowAccount, unlikeTweet, unbookmarkTweet } from './graphql-actions.js';
 import { syncFollowingSnapshot } from './graphql-following.js';
 import { fetchBookmarkRecordViaSyndication, type SyncProgress, type GapFillProgress } from './graphql-bookmarks.js';
@@ -71,6 +70,7 @@ import {
 import { resolveTrackedAccount } from './account-registry.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { resolveFollowedAccountFromCache, setFollowingLabel } from './following-review-state.js';
+import { readFeedConversationBundle } from './feed-context-store.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { assertWebAssetsBuilt, startWebServer } from './web.js';
 import { trimLikes } from './likes-trim.js';
@@ -1951,8 +1951,12 @@ export function buildCli() {
         process.exitCode = 1;
         return;
       }
+      const context = await readFeedConversationBundle(item.tweetId);
       if (options.json) {
-        console.log(JSON.stringify(item, null, 2));
+        console.log(JSON.stringify({
+          ...item,
+          conversationContext: context ?? undefined,
+        }, null, 2));
         return;
       }
       console.log(`${item.id}  ${item.authorHandle ? `@${item.authorHandle}` : '@?'}  ${(item.postedAt ?? item.syncedAt)?.slice(0, 10) ?? '?'}`);
@@ -1960,87 +1964,52 @@ export function buildCli() {
       console.log(item.text);
       console.log(`\n${item.url}`);
       console.log(`sortIndex: ${item.sortIndex ?? 'unknown'}  page: ${item.fetchPage ?? '?'}  position: ${item.fetchPosition ?? '?'}`);
+      console.log();
+      console.log(formatFeedConversationSummary(context).join('\n'));
     }));
 
-  const feedAgent = feed
-    .command('agent')
-    .description('Run autonomous feed liking/bookmarking and inspect its local history');
+  const feedContext = feed
+    .command('context')
+    .description('Collect and inspect conversation context for cached feed items');
 
-  feedAgent
-    .command('run')
-    .description('Run the autonomous feed agent once or on a fixed interval')
-    .option('--max-pages <n>', 'How many feed pages to sync before evaluating', (v: string) => Number(v), 1)
-    .option('--candidate-limit <n>', 'How many local feed items to score this run', (v: string) => Number(v), 40)
-    .option('--like-threshold <n>', 'Like threshold between 0 and 1', (v: string) => Number(v))
-    .option('--bookmark-threshold <n>', 'Bookmark threshold between 0 and 1', (v: string) => Number(v))
-    .option('--every <interval>', 'Repeat forever with an interval like 30s, 5m, or 2h')
-    .option('--dry-run', 'Score and log decisions without sending remote actions')
+  feedContext
+    .command('sync')
+    .description('Fetch replies/comments for recent cached feed items')
+    .option('--limit <n>', 'How many recent feed items to expand', (v: string) => Number(v), 10)
+    .option('--tweet-id <id>', 'Only collect context for one cached feed item')
+    .option('--max-replies <n>', 'Maximum replies/comments to store per feed item', (v: string) => Number(v), 40)
     .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
     .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
     .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
     .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
     .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
     .action(safe(async (options) => {
+      if (!requireFeedData()) return;
       ensureDataDir();
-      const sessionOptions = resolveBrowserSessionOptions(options);
+      const result = await syncFeedConversationContext({
+        limit: options.tweetId ? undefined : (Number(options.limit) || 10),
+        tweetId: options.tweetId ? String(options.tweetId) : undefined,
+        maxReplies: Number(options.maxReplies) || 40,
+        ...resolveBrowserSessionOptions(options),
+      });
 
-      const runOnce = async (): Promise<void> => {
-        const result = await runFeedAgent({
-          maxPages: Number(options.maxPages) || 0,
-          candidateLimit: Number(options.candidateLimit) || 40,
-          likeThreshold: options.likeThreshold != null ? Number(options.likeThreshold) : undefined,
-          bookmarkThreshold: options.bookmarkThreshold != null ? Number(options.bookmarkThreshold) : undefined,
-          dryRun: Boolean(options.dryRun),
-          ...sessionOptions,
-        });
-
-        console.log(`Feed agent run: ${result.runId}`);
-        console.log(`  feed refresh: ${result.feedSync.attempted ? `${result.feedSync.added} new (${result.feedSync.totalItems} total)` : 'skipped'}`);
-        console.log(`  consumed: ${result.evaluated}`);
-        console.log(`  auto-liked: ${result.liked}`);
-        console.log(`  auto-bookmarked: ${result.bookmarked}`);
-        console.log(`  skipped: ${result.skipped}`);
-        console.log(`  action failures: ${result.failed}`);
-        if (result.dryRun) console.log('  mode: dry-run');
-        console.log(`  state: ${result.statePath}`);
-        console.log(`  log: ${result.logPath}`);
-      };
-
-      const every = options.every ? String(options.every) : undefined;
-      if (!every) {
-        await runOnce();
-        return;
-      }
-
-      const intervalMs = parseIntervalMs(every);
-      console.log(`Feed agent scheduler: every ${every}`);
-
-      while (true) {
-        await runOnce();
-        const nextRunAt = new Date(Date.now() + intervalMs).toISOString();
-        console.log(`  next run: ${nextRunAt}`);
-        console.log(`  waiting: ${every}`);
-        const shouldContinue = await waitForNextRun(intervalMs);
-        if (!shouldContinue) {
-          console.log('Feed agent scheduler stopped.');
-          return;
-        }
-      }
+      console.log('Feed context sync');
+      console.log(`  requested: ${result.requested}`);
+      console.log(`  stored: ${result.stored}`);
+      console.log(`  skipped: ${result.skipped}`);
+      console.log(`  unavailable: ${result.unavailable}`);
+      console.log(`  replies stored: ${result.totalReplies}`);
     }));
 
   const feedDaemon = feed
     .command('daemon')
-    .description('Run feed refresh plus immediate consumption on a recurring timer');
+    .description('Run recurring feed collection and local semantic indexing');
 
   feedDaemon
     .command('start')
     .description('Start the recurring feed daemon')
     .requiredOption('--every <interval>', 'Repeat with an interval like 30s, 5m, or 2h')
-    .option('--max-pages <n>', 'How many feed pages to sync before consuming', (v: string) => Number(v), 1)
-    .option('--candidate-limit <n>', 'How many new feed items to score each tick', (v: string) => Number(v), 40)
-    .option('--like-threshold <n>', 'Like threshold between 0 and 1', (v: string) => Number(v))
-    .option('--bookmark-threshold <n>', 'Bookmark threshold between 0 and 1', (v: string) => Number(v))
-    .option('--dry-run', 'Score and log decisions without sending remote actions')
+    .option('--max-pages <n>', 'How many feed pages to sync on each tick', (v: string) => Number(v), 1)
     .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
     .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
     .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
@@ -2050,14 +2019,10 @@ export function buildCli() {
       ensureDataDir();
       const intervalMs = parseIntervalMs(String(options.every));
       console.log(`Feed daemon: every ${String(options.every)}`);
-      console.log('  Each tick: refresh feed -> consume new items');
+      console.log('  Each tick: refresh feed -> refresh semantic index');
       await startFeedDaemon({
         everyMs: intervalMs,
         maxPages: options.maxPages != null ? Number(options.maxPages) : 1,
-        candidateLimit: options.candidateLimit != null ? Number(options.candidateLimit) : 40,
-        likeThreshold: options.likeThreshold != null ? Number(options.likeThreshold) : undefined,
-        bookmarkThreshold: options.bookmarkThreshold != null ? Number(options.bookmarkThreshold) : undefined,
-        dryRun: Boolean(options.dryRun),
         ...resolveBrowserSessionOptions(options),
       });
     }));
@@ -2090,79 +2055,9 @@ export function buildCli() {
       if (state.pid) console.log('\n  Use your shell or tail on the daemon log for live follow-up.');
     }));
 
-  const feedPrefs = feed
-    .command('prefs')
-    .description('Manage explicit feed preferences for auto-like and auto-bookmark decisions');
-
   const feedSemantic = feed
     .command('semantic')
     .description('Inspect and rebuild the local semantic retrieval index');
-
-  feedPrefs
-    .command('show')
-    .description('Show active feed preferences')
-    .action(() => {
-      console.log(formatFeedPreferences(loadFeedPreferences()));
-    });
-
-  feedPrefs
-    .command('like')
-    .description('Prefer a target for automatic likes')
-    .argument('<kind>', 'author, domain, or topic')
-    .argument('<value>', 'Target value')
-    .action(safe(async (kind: string, value: string) => {
-      addFeedPreference('like', 'prefer', kind as 'author' | 'domain' | 'topic', value);
-      console.log(formatFeedPreferences(loadFeedPreferences()));
-    }));
-
-  feedPrefs
-    .command('dislike')
-    .description('Avoid a target for automatic likes')
-    .argument('<kind>', 'author, domain, or topic')
-    .argument('<value>', 'Target value')
-    .action(safe(async (kind: string, value: string) => {
-      addFeedPreference('like', 'avoid', kind as 'author' | 'domain' | 'topic', value);
-      console.log(formatFeedPreferences(loadFeedPreferences()));
-    }));
-
-  feedPrefs
-    .command('bookmark')
-    .description('Prefer a target for automatic bookmarks')
-    .argument('<kind>', 'author, domain, or topic')
-    .argument('<value>', 'Target value')
-    .action(safe(async (kind: string, value: string) => {
-      addFeedPreference('bookmark', 'prefer', kind as 'author' | 'domain' | 'topic', value);
-      console.log(formatFeedPreferences(loadFeedPreferences()));
-    }));
-
-  feedPrefs
-    .command('avoid-bookmark')
-    .description('Avoid a target for automatic bookmarks')
-    .argument('<kind>', 'author, domain, or topic')
-    .argument('<value>', 'Target value')
-    .action(safe(async (kind: string, value: string) => {
-      addFeedPreference('bookmark', 'avoid', kind as 'author' | 'domain' | 'topic', value);
-      console.log(formatFeedPreferences(loadFeedPreferences()));
-    }));
-
-  feedPrefs
-    .command('remove')
-    .description('Remove one explicit feed preference')
-    .argument('<mode>', 'like, dislike, bookmark, or avoid-bookmark')
-    .argument('<kind>', 'author, domain, or topic')
-    .argument('<value>', 'Target value')
-    .action(safe(async (mode: string, kind: string, value: string) => {
-      const mapping = {
-        like: ['like', 'prefer'],
-        dislike: ['like', 'avoid'],
-        bookmark: ['bookmark', 'prefer'],
-        'avoid-bookmark': ['bookmark', 'avoid'],
-      } as const;
-      const resolved = mapping[mode as keyof typeof mapping];
-      if (!resolved) throw new Error(`Invalid preference mode: "${mode}".`);
-      removeFeedPreference(resolved[0], resolved[1], kind as 'author' | 'domain' | 'topic', value);
-      console.log(formatFeedPreferences(loadFeedPreferences()));
-    }));
 
   feedSemantic
     .command('status')
@@ -2173,34 +2068,12 @@ export function buildCli() {
 
   feedSemantic
     .command('rebuild')
-    .description('Rebuild semantic vectors for feed, likes, bookmarks, and topic preferences')
+    .description('Rebuild semantic vectors for feed, likes, and bookmarks')
     .action(safe(async () => {
       ensureDataDir();
       const meta = await rebuildSemanticIndex();
       console.log(formatSemanticStatus(await getSemanticStatusView()));
       console.log(`\nSemantic rebuild complete at ${meta.updatedAt}.`);
-    }));
-
-  feedAgent
-    .command('status')
-    .description('Show cumulative feed agent state and local artifact paths')
-    .option('--like-threshold <n>', 'Like threshold between 0 and 1', (v: string) => Number(v))
-    .option('--bookmark-threshold <n>', 'Bookmark threshold between 0 and 1', (v: string) => Number(v))
-    .action(safe(async (options) => {
-      const view = await getFeedAgentStatusView({
-        likeThreshold: options.likeThreshold != null ? Number(options.likeThreshold) : undefined,
-        bookmarkThreshold: options.bookmarkThreshold != null ? Number(options.bookmarkThreshold) : undefined,
-      });
-      console.log(formatFeedAgentStatus(view));
-    }));
-
-  feedAgent
-    .command('log')
-    .description('Show recent feed agent actions and skips')
-    .option('--limit <n>', 'How many log entries to print', (v: string) => Number(v), 20)
-    .action(safe(async (options) => {
-      const entries = await listFeedAgentLog(Number(options.limit) || 20);
-      console.log(formatFeedAgentLog(entries));
     }));
 
   // ── path ────────────────────────────────────────────────────────────────

@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createEmbeddingProvider, loadEmbeddingProviderConfig, probeEmbeddingProvider } from './embeddings.js';
 import { readJson, readJsonLines, pathExists, writeJson } from './fs.js';
-import { loadFeedPreferences } from './feed-preferences.js';
 import { rebuildArchiveStoreFromCaches } from './archive-store.js';
 import {
   twitterArchiveCachePath,
@@ -12,14 +11,11 @@ import { SemanticStore } from './semantic-store.js';
 import type {
   ArchiveItem,
   BookmarkRecord,
-  FeedPreferenceRule,
-  FeedPreferences,
   FeedRecord,
   LikeRecord,
   SemanticDocumentRow,
   SemanticDocumentSource,
   SemanticMeta,
-  SemanticPreferenceRow,
 } from './types.js';
 
 const SEMANTIC_SCHEMA_VERSION = 1;
@@ -49,17 +45,7 @@ export interface SemanticStatusView {
   lastUpdatedAt?: string;
   lastFullRebuildAt?: string;
   documents: Record<SemanticDocumentSource, number>;
-  preferences: SemanticMeta['preferences'];
   error?: string;
-}
-
-function defaultPreferenceCounts(): SemanticMeta['preferences'] {
-  return {
-    likePrefer: 0,
-    likeAvoid: 0,
-    bookmarkPrefer: 0,
-    bookmarkAvoid: 0,
-  };
 }
 
 function defaultSemanticMeta(): SemanticMeta {
@@ -76,7 +62,6 @@ function defaultSemanticMeta(): SemanticMeta {
       likes: 0,
       bookmarks: 0,
     },
-    preferences: defaultPreferenceCounts(),
   };
 }
 
@@ -103,10 +88,6 @@ export function semanticDocumentId(source: SemanticDocumentSource, tweetId: stri
   return `${source}:${tweetId}`;
 }
 
-export function semanticPreferenceId(action: 'like' | 'bookmark', disposition: 'prefer' | 'avoid', normalizedText: string): string {
-  return `${action}:${disposition}:topic:${normalizedText}`;
-}
-
 export function buildSemanticText(record: BaseDocumentLike): string {
   const parts = [
     record.authorName?.trim(),
@@ -116,30 +97,6 @@ export function buildSemanticText(record: BaseDocumentLike): string {
     normalizeDomains(record.links).join(' '),
   ].filter((value): value is string => Boolean(value));
   return parts.join('\n');
-}
-
-function preferenceTopicRows(feedPreferences: FeedPreferences, version: string): Array<Omit<SemanticPreferenceRow, 'vector'>> {
-  const rows: Array<Omit<SemanticPreferenceRow, 'vector'>> = [];
-  const addRules = (action: 'like' | 'bookmark', disposition: 'prefer' | 'avoid', rules: FeedPreferenceRule[]) => {
-    for (const rule of rules) {
-      if (rule.kind !== 'topic') continue;
-      rows.push({
-        id: semanticPreferenceId(action, disposition, rule.value),
-        action,
-        disposition,
-        rawText: rule.value,
-        normalizedText: rule.value,
-        textHash: hashText(rule.value),
-        embeddingVersion: version,
-      });
-    }
-  };
-
-  addRules('like', 'prefer', feedPreferences.like.prefer);
-  addRules('like', 'avoid', feedPreferences.like.avoid);
-  addRules('bookmark', 'prefer', feedPreferences.bookmark.prefer);
-  addRules('bookmark', 'avoid', feedPreferences.bookmark.avoid);
-  return rows;
 }
 
 function dedupeRecords<T extends { tweetId: string }>(records: T[]): T[] {
@@ -240,35 +197,6 @@ async function syncDocumentSource(
   return dimensions;
 }
 
-async function syncPreferenceTopics(
-  store: SemanticStore,
-  provider: ReturnType<typeof createEmbeddingProvider>,
-  rows: Array<Omit<SemanticPreferenceRow, 'vector'>>,
-): Promise<number | undefined> {
-  const existingMap = await store.getPreferencesByIds(rows.map((row) => row.id));
-  const toEmbed = rows.filter((row) => {
-    const existing = existingMap.get(row.id);
-    return !existing || existing.textHash !== row.textHash || existing.embeddingVersion !== row.embeddingVersion;
-  });
-
-  let dimensions: number | undefined;
-  if (toEmbed.length > 0) {
-    const vectors = await provider.embed(toEmbed.map((row) => row.rawText));
-    dimensions = vectors[0]?.length;
-    await store.upsertPreferences(toEmbed.map((row, index) => ({
-      ...row,
-      vector: vectors[index],
-    })));
-  }
-
-  const existingRows = await store.listPreferences();
-  const desiredIds = new Set(rows.map((row) => row.id));
-  const staleIds = existingRows.filter((row) => !desiredIds.has(row.id)).map((row) => row.id);
-  await store.deletePreferenceIds(staleIds);
-
-  return dimensions;
-}
-
 async function buildSemanticMeta(
   dimensions: number,
   lastFullRebuildAt?: string,
@@ -290,12 +218,6 @@ async function buildSemanticMeta(
         likes: await store.countDocumentsBySource('likes'),
         bookmarks: await store.countDocumentsBySource('bookmarks'),
       },
-      preferences: {
-        likePrefer: await store.countPreferences('like', 'prefer'),
-        likeAvoid: await store.countPreferences('like', 'avoid'),
-        bookmarkPrefer: await store.countPreferences('bookmark', 'prefer'),
-        bookmarkAvoid: await store.countPreferences('bookmark', 'avoid'),
-      },
     };
   } finally {
     await store.close();
@@ -308,7 +230,6 @@ export async function syncSemanticIndexForRun(feedItems: FeedRecord[]): Promise<
   const version = embeddingVersion(config.provider, config.model);
   await rebuildArchiveStoreFromCaches();
   const archiveItems = await readJsonLines<ArchiveItem>(twitterArchiveCachePath());
-  const feedPreferences = loadFeedPreferences();
   const store = await SemanticStore.open();
 
   let dimensions: number | undefined;
@@ -317,7 +238,6 @@ export async function syncSemanticIndexForRun(feedItems: FeedRecord[]): Promise<
     dimensions = (await syncDocumentSource(store, provider, 'likes', canonicalDocumentRowsForSource('likes', archiveItems, version), true)) ?? dimensions;
     dimensions = (await syncDocumentSource(store, provider, 'feed', canonicalDocumentRowsForSource('feed', archiveItems, version), true)) ?? dimensions;
     dimensions = (await syncDocumentSource(store, provider, 'feed', documentRowsForSource('feed', feedItems, version), false)) ?? dimensions;
-    dimensions = (await syncPreferenceTopics(store, provider, preferenceTopicRows(feedPreferences, version))) ?? dimensions;
   } finally {
     await store.close();
   }
@@ -341,7 +261,6 @@ export async function rebuildSemanticIndex(): Promise<SemanticMeta> {
     readJsonLines<ArchiveItem>(twitterArchiveCachePath()),
     readJsonLines<FeedRecord>(twitterFeedCachePath()),
   ]);
-  const feedPreferences = loadFeedPreferences();
   const store = await SemanticStore.open();
 
   let dimensions: number | undefined;
@@ -350,7 +269,6 @@ export async function rebuildSemanticIndex(): Promise<SemanticMeta> {
     dimensions = (await syncDocumentSource(store, provider, 'likes', canonicalDocumentRowsForSource('likes', archiveItems, version), true)) ?? dimensions;
     dimensions = (await syncDocumentSource(store, provider, 'feed', canonicalDocumentRowsForSource('feed', archiveItems, version), true)) ?? dimensions;
     dimensions = (await syncDocumentSource(store, provider, 'feed', documentRowsForSource('feed', feed, version), false)) ?? dimensions;
-    dimensions = (await syncPreferenceTopics(store, provider, preferenceTopicRows(feedPreferences, version))) ?? dimensions;
   } finally {
     await store.close();
   }
@@ -397,7 +315,6 @@ export async function getSemanticStatusView(): Promise<SemanticStatusView> {
       lastUpdatedAt: meta.updatedAt,
       lastFullRebuildAt: meta.lastFullRebuildAt,
       documents: meta.documents,
-      preferences: meta.preferences,
       error,
     };
   } catch (caught) {
@@ -423,7 +340,6 @@ export async function getSemanticStatusView(): Promise<SemanticStatusView> {
       lastUpdatedAt: meta.updatedAt,
       lastFullRebuildAt: meta.lastFullRebuildAt,
       documents: meta.documents,
-      preferences: meta.preferences,
       error,
     };
   }
@@ -442,7 +358,6 @@ export function formatSemanticStatus(view: SemanticStatusView): string {
     `  last updated: ${view.lastUpdatedAt ?? 'never'}`,
     `  last full rebuild: ${view.lastFullRebuildAt ?? 'never'}`,
     `  documents: feed=${view.documents.feed} likes=${view.documents.likes} bookmarks=${view.documents.bookmarks}`,
-    `  preference topics: like=${view.preferences.likePrefer}/${view.preferences.likeAvoid} bookmark=${view.preferences.bookmarkPrefer}/${view.preferences.bookmarkAvoid}`,
     `  meta: ${twitterSemanticMetaPath()}`,
     view.error ? `  error: ${view.error}` : undefined,
   ].filter((line): line is string => Boolean(line)).join('\n');

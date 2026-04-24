@@ -14,6 +14,10 @@ import { readJson, readJsonLines, writeJson, writeJsonLines } from '../src/fs.js
 
 const NOW = '2026-04-19T08:00:00.000Z';
 
+function toLegacyTwitterDate(date: Date): string {
+  return date.toUTCString().replace(',', '').replace('GMT', '+0000');
+}
+
 function makeUserResult(overrides: Record<string, any> = {}) {
   return {
     rest_id: '44196397',
@@ -411,6 +415,8 @@ test('syncAccountTimelineGraphQL reports stale stop reason when no newer tweets 
 test('syncAccountTimelineGraphQL prunes records outside the retain window', async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'ft-account-sync-prune-'));
   process.env.FT_DATA_DIR = tmpDir;
+  const oldPostedAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+  const freshPostedAt = new Date(Date.now() - 2 * 60 * 60 * 1000);
 
   await mkdir(path.join(tmpDir, 'accounts', '44196397'), { recursive: true });
   await writeJsonLines(path.join(tmpDir, 'accounts', '44196397', 'timeline.jsonl'), [{
@@ -424,7 +430,7 @@ test('syncAccountTimelineGraphQL prunes records outside the retain window', asyn
     authorHandle: 'elonmusk',
     authorName: 'Elon Musk',
     syncedAt: '2026-04-01T08:00:00.000Z',
-    postedAt: 'Tue Apr 01 07:00:00 +0000 2026',
+    postedAt: toLegacyTwitterDate(oldPostedAt),
     links: [],
     tags: [],
     ingestedVia: 'graphql' as const,
@@ -445,7 +451,7 @@ test('syncAccountTimelineGraphQL prunes records outside the retain window', asyn
         legacy: {
           ...makeTweetResult().legacy,
           id_str: '1900000000000000009',
-          created_at: 'Sun Apr 19 07:00:00 +0000 2026',
+          created_at: toLegacyTwitterDate(freshPostedAt),
           full_text: 'new post',
         },
       })),

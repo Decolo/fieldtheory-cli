@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { buildFeedIndex } from '../src/feed-db.js';
 import { writeJson } from '../src/fs.js';
 import { buildCli } from '../src/cli.js';
+import { writeFeedConversationBundle } from '../src/feed-context-store.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -55,6 +56,53 @@ test('buildCli help includes feed command group', () => {
   assert.match(help, /\bfeed\b/);
 });
 
+test('buildCli feed group no longer exposes agent or prefs commands', () => {
+  const cli = buildCli();
+  const feed = cli.commands.find((command) => command.name() === 'feed');
+  assert.ok(feed);
+  assert.equal(feed.commands.some((command) => command.name() === 'agent'), false);
+  assert.equal(feed.commands.some((command) => command.name() === 'prefs'), false);
+  assert.equal(feed.commands.some((command) => command.name() === 'daemon'), true);
+  assert.equal(feed.commands.some((command) => command.name() === 'context'), true);
+  assert.equal(feed.commands.some((command) => command.name() === 'semantic'), true);
+});
+
+test('feed daemon help reflects collection-only behavior', () => {
+  const cli = buildCli();
+  const feed = cli.commands.find((command) => command.name() === 'feed');
+  assert.ok(feed);
+  const daemon = feed.commands.find((command) => command.name() === 'daemon');
+  assert.ok(daemon);
+  assert.match(daemon.helpInformation(), /collection/i);
+  assert.doesNotMatch(daemon.helpInformation(), /consume/i);
+
+  const start = daemon.commands.find((command) => command.name() === 'start');
+  assert.ok(start);
+  const help = start.helpInformation();
+  assert.match(help, /--every <interval>/);
+  assert.doesNotMatch(help, /like threshold|bookmark threshold|dry-run|candidate-limit/i);
+});
+
+test('removed feed agent and prefs commands fail as unknown commands', async () => {
+  const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+
+  await assert.rejects(
+    execFileAsync(tsx, ['src/cli.ts', 'feed', 'agent', 'run'], {
+      cwd: process.cwd(),
+      env: process.env,
+    }),
+    /unknown command ['"]agent['"]/i,
+  );
+
+  await assert.rejects(
+    execFileAsync(tsx, ['src/cli.ts', 'feed', 'prefs', 'show'], {
+      cwd: process.cwd(),
+      env: process.env,
+    }),
+    /unknown command ['"]prefs['"]/i,
+  );
+});
+
 test('ft feed status prints feed-specific summary', async () => {
   await withFeedDataDir(async (dir) => {
     const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
@@ -85,6 +133,30 @@ test('ft feed list lists cached feed items', async () => {
 
 test('ft feed show prints details for one feed item', async () => {
   await withFeedDataDir(async (dir) => {
+    await writeFeedConversationBundle({
+      schemaVersion: 1,
+      rootFeedTweetId: '1',
+      rootFeedItemId: '1',
+      conversationTweetId: '1',
+      conversationId: '1',
+      targetKind: 'feed_tweet',
+      fetchedAt: '2026-04-12T14:10:00Z',
+      outcome: 'success',
+      summary: 'Conversation fetched successfully with 1 reply.',
+      replies: [
+        {
+          id: '2',
+          tweetId: '2',
+          url: 'https://x.com/bob/status/2',
+          text: 'I agree with this take',
+          authorHandle: 'bob',
+          syncedAt: '2026-04-12T14:10:00Z',
+          postedAt: '2026-04-12T13:10:00Z',
+          ingestedVia: 'graphql',
+        },
+      ],
+    });
+
     const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
     const { stdout } = await execFileAsync(tsx, ['src/cli.ts', 'feed', 'show', '1'], {
       cwd: process.cwd(),
@@ -93,5 +165,58 @@ test('ft feed show prints details for one feed item', async () => {
 
     assert.match(stdout, /Alice Smith/);
     assert.match(stdout, /Machine learning agents are getting better/);
+    assert.match(stdout, /Conversation context/);
+    assert.match(stdout, /sample replies/i);
+    assert.match(stdout, /@bob/);
   });
+});
+
+test('ft feed show --json preserves the feed item shape and adds optional conversationContext', async () => {
+  await withFeedDataDir(async (dir) => {
+    await writeFeedConversationBundle({
+      schemaVersion: 1,
+      rootFeedTweetId: '1',
+      rootFeedItemId: '1',
+      conversationTweetId: '1',
+      conversationId: '1',
+      targetKind: 'feed_tweet',
+      fetchedAt: '2026-04-12T14:10:00Z',
+      outcome: 'success',
+      replies: [],
+    });
+
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const { stdout } = await execFileAsync(tsx, ['src/cli.ts', 'feed', 'show', '1', '--json'], {
+      cwd: process.cwd(),
+      env: { ...process.env, FT_DATA_DIR: dir },
+    });
+
+    const payload = JSON.parse(stdout);
+    assert.equal(payload.id, '1');
+    assert.equal(payload.tweetId, '1');
+    assert.equal(payload.authorHandle, 'alice');
+    assert.ok(payload.conversationContext);
+    assert.equal(payload.conversationContext.rootFeedTweetId, '1');
+  });
+});
+
+test('ft feed context sync fails with feed-specific guidance before any local feed data exists', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-cli-feed-empty-'));
+
+  try {
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    await assert.rejects(
+      execFileAsync(tsx, ['src/cli.ts', 'feed', 'context', 'sync'], {
+        cwd: process.cwd(),
+        env: { ...process.env, FT_DATA_DIR: dir },
+      }),
+      (error: any) => {
+        assert.match(String(error.stdout), /No feed items synced yet/);
+        assert.match(String(error.stdout), /Run: ft feed sync/);
+        return true;
+      },
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

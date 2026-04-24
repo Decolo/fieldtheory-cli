@@ -3,14 +3,12 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { loadFeedPreferences, saveFeedPreferences } from '../src/feed-preferences.js';
 import { readJson, writeJson } from '../src/fs.js';
 import {
   formatSemanticStatus,
   getSemanticStatusView,
   rebuildSemanticIndex,
   semanticDocumentId,
-  semanticPreferenceId,
   syncSemanticIndexForRun,
 } from '../src/semantic-indexer.js';
 import { SemanticStore } from '../src/semantic-store.js';
@@ -70,7 +68,6 @@ async function withSemanticData(fn: (dir: string) => Promise<void>): Promise<voi
   const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-semantic-indexer-'));
   process.env.FT_DATA_DIR = dir;
   process.env.FT_EMBEDDING_API_KEY = 'test-key';
-  const previousPrefs = loadFeedPreferences();
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
     const parsed = JSON.parse(String(init?.body ?? '{}'));
@@ -93,34 +90,21 @@ async function withSemanticData(fn: (dir: string) => Promise<void>): Promise<voi
     await writeJson(path.join(dir, 'bookmarks-meta.json'), { provider: 'twitter', schemaVersion: 1, totalBookmarks: BOOKMARKS.length });
     await writeJson(path.join(dir, 'likes-meta.json'), { provider: 'twitter', schemaVersion: 1, totalLikes: LIKES.length });
     await writeJson(path.join(dir, 'feed-meta.json'), { provider: 'twitter', schemaVersion: 1, totalItems: FEED.length, totalSkippedEntries: 0 });
-    saveFeedPreferences({
-      like: {
-        prefer: [{ kind: 'topic', value: 'ai agents', createdAt: '2026-04-15T00:00:00Z' }],
-        avoid: [],
-      },
-      bookmark: {
-        prefer: [],
-        avoid: [{ kind: 'topic', value: 'sports gossip', createdAt: '2026-04-15T00:00:00Z' }],
-      },
-    });
     await fn(dir);
   } finally {
     globalThis.fetch = originalFetch;
     delete process.env.FT_DATA_DIR;
     delete process.env.FT_EMBEDDING_API_KEY;
-    saveFeedPreferences(previousPrefs);
     await rm(dir, { recursive: true, force: true });
   }
 }
 
-test('syncSemanticIndexForRun embeds likes, bookmarks, feed items, and topic preferences', async () => {
+test('syncSemanticIndexForRun embeds likes, bookmarks, and feed items', async () => {
   await withSemanticData(async (dir) => {
     const meta = await syncSemanticIndexForRun(FEED as any);
     assert.equal(meta.documents.feed, 1);
     assert.equal(meta.documents.likes, 1);
     assert.equal(meta.documents.bookmarks, 1);
-    assert.equal(meta.preferences.likePrefer, 1);
-    assert.equal(meta.preferences.bookmarkAvoid, 1);
 
     const store = await SemanticStore.open(path.join(dir, 'semantic.lance'));
     try {
@@ -130,12 +114,6 @@ test('syncSemanticIndexForRun embeds likes, bookmarks, feed items, and topic pre
         semanticDocumentId('bookmarks', 'bm-1'),
       ]);
       assert.equal(docs.size, 3);
-
-      const prefs = await store.getPreferencesByIds([
-        semanticPreferenceId('like', 'prefer', 'ai agents'),
-        semanticPreferenceId('bookmark', 'avoid', 'sports gossip'),
-      ]);
-      assert.equal(prefs.size, 2);
     } finally {
       await store.close();
     }
