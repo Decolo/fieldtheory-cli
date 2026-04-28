@@ -23,6 +23,7 @@ const FIXTURES = [
     postedAt: '2026-01-01T12:00:00Z',
     likedAt: '2026-03-05T12:00:00Z',
     engagement: { likeCount: 100, repostCount: 10 },
+    language: 'en',
     mediaObjects: [],
     links: ['https://example.com'],
     tags: [],
@@ -78,5 +79,56 @@ test('ft likes list lists liked items', async () => {
 
     assert.match(stdout, /@alice/);
     assert.match(stdout, /https:\/\/x\.com\/alice\/status\/1/);
+  });
+});
+
+
+test('ft likes stats prints aggregate summary', async () => {
+  await withLikesDataDir(async (dir) => {
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const { stdout } = await execFileAsync(tsx, ['src/cli.ts', 'likes', 'stats'], {
+      cwd: process.cwd(),
+      env: { ...process.env, FT_DATA_DIR: dir },
+    });
+
+    assert.match(stdout, /Likes: 1/);
+    assert.match(stdout, /Unique authors: 1/);
+    assert.match(stdout, /Date range: 2026-03-05 to 2026-03-05/);
+    assert.match(stdout, /@alice: 1/);
+    assert.match(stdout, /en: 1/);
+  });
+});
+
+test('ft likes viz prints terminal dashboard', async () => {
+  await withLikesDataDir(async (dir) => {
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const { stdout } = await execFileAsync(tsx, ['src/cli.ts', 'likes', 'viz'], {
+      cwd: process.cwd(),
+      env: { ...process.env, FT_DATA_DIR: dir },
+    });
+
+    assert.match(stdout, /LIKE OBSERVATORY/);
+    assert.match(stdout, /WHO YOU LISTEN TO/);
+    assert.match(stdout, /COMPOSITION/);
+    assert.match(stdout, /1 likes/);
+  });
+});
+
+test('ft likes export prints canonical archive JSON', async () => {
+  await withLikesDataDir(async (dir) => {
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const { stdout } = await execFileAsync(tsx, ['src/cli.ts', 'likes', 'export', '--author', 'alice'], {
+      cwd: process.cwd(),
+      env: { ...process.env, FT_DATA_DIR: dir },
+    });
+
+    const payload = JSON.parse(stdout);
+    assert.equal(payload.resource, 'likes');
+    assert.equal(payload.meta.count, 1);
+    assert.equal(payload.meta.filters.author, 'alice');
+    assert.equal(payload.items[0].source, 'like');
+    assert.equal(payload.items[0].tweetId, '1');
+    assert.equal(payload.items[0].collectedAt, '2026-03-05T12:00:00Z');
+    assert.equal(payload.items[0].sourceDetails.likedAt, '2026-03-05T12:00:00Z');
   });
 });

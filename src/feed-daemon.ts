@@ -1,8 +1,6 @@
 import process from 'node:process';
 import { appendLine, pathExists, readJson, writeJson } from './fs.js';
-import { EmbeddingConfigError, EmbeddingProviderError } from './embeddings.js';
 import { fetchFeedItems } from './feed-fetcher.js';
-import { syncSemanticIndexForRun } from './semantic-indexer.js';
 import { twitterFeedDaemonLogPath, twitterFeedDaemonStatePath } from './paths.js';
 import type { FeedDaemonErrorKind, FeedDaemonLastTick, FeedDaemonStage, FeedDaemonState } from './types.js';
 import { XRequestError, sanitizeSensitiveText, type XSessionOptions } from './x-graphql.js';
@@ -19,7 +17,7 @@ function defaultState(): FeedDaemonState {
 }
 
 function normalizeFeedDaemonStage(stage: string | undefined): FeedDaemonStage {
-  if (stage === 'fetch' || stage === 'semantic' || stage === 'tick') return stage;
+  if (stage === 'fetch' || stage === 'tick') return stage;
   return 'tick';
 }
 
@@ -60,12 +58,6 @@ function summarizeError(error: unknown): { kind: FeedDaemonErrorKind; summary: s
   if (error instanceof XRequestError) {
     return { kind: error.kind, summary: sanitizeSensitiveText(error.summary) };
   }
-  if (error instanceof EmbeddingConfigError) {
-    return { kind: 'config', summary: error.message };
-  }
-  if (error instanceof EmbeddingProviderError) {
-    return { kind: 'semantic', summary: error.message };
-  }
   const message = sanitizeSensitiveText(error instanceof Error ? error.message : String(error));
   return { kind: 'unknown', summary: message || 'Unknown daemon error.' };
 }
@@ -80,7 +72,6 @@ function buildLastTick(input: {
   summary?: string;
   fetchAdded?: number;
   fetchTotalItems?: number;
-  indexedItems?: number;
 }): FeedDaemonLastTick {
   return {
     tickId: input.tickId,
@@ -93,7 +84,6 @@ function buildLastTick(input: {
     durationMs: Math.max(0, Date.parse(input.finishedAt) - Date.parse(input.startedAt)),
     fetchAdded: input.fetchAdded,
     fetchTotalItems: input.fetchTotalItems,
-    indexedItems: input.indexedItems,
   };
 }
 
@@ -156,7 +146,6 @@ export async function formatFeedDaemonStatus(): Promise<string> {
     `  last tick start: ${state.lastTickStartedAt ?? 'never'}`,
     `  last tick finish: ${state.lastTickFinishedAt ?? 'never'}`,
     `  last fetch added: ${state.lastFetchAdded ?? 0}`,
-    `  last indexed items: ${state.lastIndexedItems ?? 0}`,
     `  last stage: ${lastTick?.stage ?? 'unknown'}`,
     `  last outcome: ${lastTick?.outcome ?? 'unknown'}`,
     `  last error kind: ${lastTick?.errorKind ?? 'none'}`,
@@ -208,11 +197,6 @@ export async function startFeedDaemon(options: FeedDaemonRunOptions): Promise<vo
         total_items: fetched.totalItems,
       });
 
-      currentStage = 'semantic';
-      await writeDaemonLog({ event: 'semantic_start', tick_id: tickId, items: fetched.newItems.length });
-      await syncSemanticIndexForRun(fetched.newItems);
-      await writeDaemonLog({ event: 'semantic_ok', tick_id: tickId, items: fetched.newItems.length });
-
       const tickFinishedAt = new Date().toISOString();
       const lastTick = buildLastTick({
         tickId,
@@ -223,13 +207,11 @@ export async function startFeedDaemon(options: FeedDaemonRunOptions): Promise<vo
         summary: 'Feed daemon tick completed successfully.',
         fetchAdded: fetched.added,
         fetchTotalItems: fetched.totalItems,
-        indexedItems: fetched.newItems.length,
       });
       await updateDaemonState({
         lastTickFinishedAt: tickFinishedAt,
         lastFetchAdded: fetched.added,
         lastFetchTotalItems: fetched.totalItems,
-        lastIndexedItems: fetched.newItems.length,
         lastError: undefined,
         lastTick,
       });

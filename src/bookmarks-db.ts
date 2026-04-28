@@ -4,8 +4,6 @@ import { parseTimestampMs, toIsoDate } from './date-utils.js';
 import { readJsonLines } from './fs.js';
 import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js';
 import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
-import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
-import type { ClassificationSummary } from './bookmark-classify.js';
 import {
   countBookmarkProjections,
   getBookmarkProjectionById,
@@ -14,7 +12,7 @@ import {
 } from './archive-projections.js';
 import { rebuildArchiveStoreFromCaches } from './archive-store.js';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 export interface SearchResult {
   id: string;
@@ -44,10 +42,6 @@ export interface BookmarkTimelineItem {
   authorProfileImageUrl?: string;
   postedAt?: string | null;
   bookmarkedAt?: string | null;
-  categories: string[];
-  primaryCategory?: string | null;
-  domains: string[];
-  primaryDomain?: string | null;
   githubUrls: string[];
   links: string[];
   mediaCount: number;
@@ -65,8 +59,6 @@ export interface BookmarkTimelineFilters {
   author?: string;
   after?: string;
   before?: string;
-  category?: string;
-  domain?: string;
   sort?: 'asc' | 'desc';
   limit?: number;
   offset?: number;
@@ -80,14 +72,6 @@ function parseJsonArray(value: unknown): string[] {
   } catch {
     return [];
   }
-}
-
-function parseCsv(value: unknown): string[] {
-  if (typeof value !== 'string' || !value.trim()) return [];
-  return value
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
 }
 
 function chronologicalDateRange(values: unknown[]): { earliest: string | null; latest: string | null } {
@@ -126,20 +110,16 @@ function mapTimelineRow(row: unknown[]): BookmarkTimelineItem {
     authorProfileImageUrl: (row[6] as string) ?? undefined,
     postedAt: (row[7] as string) ?? null,
     bookmarkedAt: (row[8] as string) ?? null,
-    categories: parseCsv(row[9]),
-    primaryCategory: (row[10] as string) ?? null,
-    domains: parseCsv(row[11]),
-    primaryDomain: (row[12] as string) ?? null,
-    githubUrls: parseJsonArray(row[13]),
-    links: parseJsonArray(row[14]),
-    mediaCount: Number(row[15] ?? 0),
-    linkCount: Number(row[16] ?? 0),
-    likeCount: row[17] as number | null,
-    repostCount: row[18] as number | null,
-    replyCount: row[19] as number | null,
-    quoteCount: row[20] as number | null,
-    bookmarkCount: row[21] as number | null,
-    viewCount: row[22] as number | null,
+    githubUrls: parseJsonArray(row[9]),
+    links: parseJsonArray(row[10]),
+    mediaCount: Number(row[11] ?? 0),
+    linkCount: Number(row[12] ?? 0),
+    likeCount: row[13] as number | null,
+    repostCount: row[14] as number | null,
+    replyCount: row[15] as number | null,
+    quoteCount: row[16] as number | null,
+    bookmarkCount: row[17] as number | null,
+    viewCount: row[18] as number | null,
   };
 }
 
@@ -166,15 +146,6 @@ function buildBookmarkWhereClause(filters: BookmarkTimelineFilters): {
     conditions.push(`${bookmarkDateFilterExpression('b')} <= ?`);
     params.push(filters.before);
   }
-  if (filters.category) {
-    conditions.push(`b.categories LIKE ?`);
-    params.push(`%${filters.category}%`);
-  }
-  if (filters.domain) {
-    conditions.push(`b.domains LIKE ?`);
-    params.push(`%${filters.domain}%`);
-  }
-
   return {
     where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
     params,
@@ -203,10 +174,8 @@ function isMissingBookmarkIndexError(error: unknown): boolean {
   return message.includes('no such table') || message.includes('no such column');
 }
 
-function initSchema(db: Database): void {
-  db.run(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS bookmarks (
+function createBookmarksTable(db: Database, tableName: string): void {
+  db.run(`CREATE TABLE IF NOT EXISTS ${tableName} (
     id TEXT PRIMARY KEY,
     tweet_id TEXT NOT NULL,
     url TEXT NOT NULL,
@@ -232,20 +201,18 @@ function initSchema(db: Database): void {
     links_json TEXT,
     tags_json TEXT,
     ingested_via TEXT,
-    categories TEXT,
-    primary_category TEXT,
     github_urls TEXT,
-    domains TEXT,
-    primary_domain TEXT,
     quoted_tweet_json TEXT
   )`);
+}
+
+function initSchema(db: Database): void {
+  db.run(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`);
+  createBookmarksTable(db, 'bookmarks');
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_author ON bookmarks(author_handle)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_posted ON bookmarks(posted_at)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_language ON bookmarks(language)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_category ON bookmarks(primary_category)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_bookmarks_domain ON bookmarks(primary_domain)`);
-
   db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
     text,
     author_handle,
@@ -258,37 +225,90 @@ function initSchema(db: Database): void {
   db.run(`REPLACE INTO meta VALUES ('schema_version', '${SCHEMA_VERSION}')`);
 }
 
+function tableExists(db: Database, tableName: string): boolean {
+  const rows = db.exec(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+    [tableName],
+  );
+  return Boolean(rows[0]?.values.length);
+}
+
+function tableColumns(db: Database, tableName: string): Set<string> {
+  const rows = db.exec(`PRAGMA table_info(${tableName})`);
+  return new Set((rows[0]?.values ?? []).map((row) => String(row[1])));
+}
+
+function selectColumnOrNull(columns: Set<string>, columnName: string): string {
+  return columns.has(columnName) ? columnName : `NULL AS ${columnName}`;
+}
+
+function migrateBookmarksSchemaV5(db: Database): void {
+  const columns = tableColumns(db, 'bookmarks');
+  const targetColumns = [
+    'id',
+    'tweet_id',
+    'url',
+    'text',
+    'author_handle',
+    'author_name',
+    'author_profile_image_url',
+    'posted_at',
+    'bookmarked_at',
+    'synced_at',
+    'conversation_id',
+    'in_reply_to_status_id',
+    'quoted_status_id',
+    'language',
+    'like_count',
+    'repost_count',
+    'reply_count',
+    'quote_count',
+    'bookmark_count',
+    'view_count',
+    'media_count',
+    'link_count',
+    'links_json',
+    'tags_json',
+    'ingested_via',
+    'github_urls',
+    'quoted_tweet_json',
+  ];
+  const selectColumns = targetColumns.map((columnName) => selectColumnOrNull(columns, columnName));
+
+  db.run('DROP TABLE IF EXISTS bookmarks_fts');
+  db.run('DROP TABLE IF EXISTS bookmarks_v5');
+  createBookmarksTable(db, 'bookmarks_v5');
+  db.run(
+    `INSERT INTO bookmarks_v5 (${targetColumns.join(', ')})
+     SELECT ${selectColumns.join(', ')} FROM bookmarks`,
+  );
+  db.run('DROP TABLE bookmarks');
+  db.run('ALTER TABLE bookmarks_v5 RENAME TO bookmarks');
+}
+
 function ensureMigrations(db: Database): void {
-  // Ensure meta table exists (may not on a fresh/empty DB)
   db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)');
   const rows = db.exec("SELECT value FROM meta WHERE key = 'schema_version'");
   const version = rows.length ? Number(rows[0].values[0]?.[0] ?? 0) : 0;
-  if (version < 3) {
-    // bookmarks table may not exist yet (first run before index build)
-    const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
-    if (tableExists.length && tableExists[0].values.length > 0) {
-      try { db.run('ALTER TABLE bookmarks ADD COLUMN domains TEXT'); } catch { /* already exists */ }
-      try { db.run('ALTER TABLE bookmarks ADD COLUMN primary_domain TEXT'); } catch { /* already exists */ }
-      db.run('CREATE INDEX IF NOT EXISTS idx_bookmarks_domain ON bookmarks(primary_domain)');
-    }
+  const hasBookmarks = tableExists(db, 'bookmarks');
+  const hasLegacyColumns = hasBookmarks
+    ? ['categories', 'primary_category', 'domains', 'primary_domain'].some((column) => tableColumns(db, 'bookmarks').has(column))
+    : false;
+
+  if (hasBookmarks && (version < 5 || hasLegacyColumns)) {
+    migrateBookmarksSchemaV5(db);
+    initSchema(db);
+    db.run(`INSERT INTO bookmarks_fts(bookmarks_fts) VALUES('rebuild')`);
+    saveDb(db, twitterBookmarksIndexPath());
   }
-  if (version < 4) {
-    const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
-    if (tableExists.length && tableExists[0].values.length > 0) {
-      try { db.run('ALTER TABLE bookmarks ADD COLUMN quoted_tweet_json TEXT'); } catch { /* already exists */ }
-    }
-  }
-  if (version < SCHEMA_VERSION) {
+
+  if (version < SCHEMA_VERSION || hasLegacyColumns) {
     db.run(`REPLACE INTO meta VALUES ('schema_version', '${SCHEMA_VERSION}')`);
   }
 }
 
 interface PreservedBookmarkFields {
-  categories: string | null;
-  primaryCategory: string | null;
   githubUrls: string | null;
-  domains: string | null;
-  primaryDomain: string | null;
   quotedTweetJson: string | null;
 }
 
@@ -300,7 +320,13 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
   const githubUrls = [...new Set([...githubMatches.map((m) => `https://${m}`), ...githubFromLinks])];
 
   db.run(
-    `INSERT OR REPLACE INTO bookmarks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT OR REPLACE INTO bookmarks (
+      id, tweet_id, url, text, author_handle, author_name, author_profile_image_url,
+      posted_at, bookmarked_at, synced_at, conversation_id, in_reply_to_status_id,
+      quoted_status_id, language, like_count, repost_count, reply_count, quote_count,
+      bookmark_count, view_count, media_count, link_count, links_json, tags_json,
+      ingested_via, github_urls, quoted_tweet_json
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       r.id,
       r.tweetId,
@@ -327,11 +353,7 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
       r.links?.length ? JSON.stringify(r.links) : null,
       r.tags?.length ? JSON.stringify(r.tags) : null,
       r.ingestedVia ?? null,
-      preserved?.categories ?? null,
-      preserved?.primaryCategory ?? 'unclassified',
       preserved?.githubUrls ?? (githubUrls.length ? JSON.stringify(githubUrls) : null),
-      preserved?.domains ?? null,
-      preserved?.primaryDomain ?? null,
       r.quotedTweet ? JSON.stringify(r.quotedTweet) : (preserved?.quotedTweetJson ?? null),
     ]
   );
@@ -353,21 +375,17 @@ export async function buildIndex(options?: { force?: boolean }): Promise<{ dbPat
     initSchema(db);
     ensureMigrations(db);
 
-    // Preserve classification and enrichment fields when refreshing existing rows.
+    // Preserve local enrichment fields when refreshing existing rows.
     const existingRows = new Map<string, PreservedBookmarkFields>();
     try {
       const rows = db.exec(
-        `SELECT id, categories, primary_category, github_urls, domains, primary_domain, quoted_tweet_json
+        `SELECT id, github_urls, quoted_tweet_json
          FROM bookmarks`
       );
       for (const r of (rows[0]?.values ?? [])) {
         existingRows.set(r[0] as string, {
-          categories: (r[1] as string) ?? null,
-          primaryCategory: (r[2] as string) ?? null,
-          githubUrls: (r[3] as string) ?? null,
-          domains: (r[4] as string) ?? null,
-          primaryDomain: (r[5] as string) ?? null,
-          quotedTweetJson: (r[6] as string) ?? null,
+          githubUrls: (r[1] as string) ?? null,
+          quotedTweetJson: (r[2] as string) ?? null,
         });
       }
     } catch { /* table may be empty */ }
@@ -508,10 +526,6 @@ export async function listBookmarks(
           b.author_profile_image_url,
           b.posted_at,
           b.bookmarked_at,
-          b.categories,
-          b.primary_category,
-          b.domains,
-          b.primary_domain,
           b.github_urls,
           b.links_json,
           b.media_count,
@@ -646,10 +660,6 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
           b.author_profile_image_url,
           b.posted_at,
           b.bookmarked_at,
-          b.categories,
-          b.primary_category,
-          b.domains,
-          b.primary_domain,
           b.github_urls,
           b.links_json,
           b.media_count,
@@ -726,157 +736,25 @@ export async function getStats(): Promise<{
   }
 }
 
-// ── Classification ───────────────────────────────────────────────────────
-
-export async function classifyAndRebuild(): Promise<{
-  dbPath: string;
-  recordCount: number;
-  summary: ClassificationSummary;
-}> {
-  const cachePath = twitterBookmarksCachePath();
-  const dbPath = twitterBookmarksIndexPath();
-  const records = await readJsonLines<BookmarkRecord>(cachePath);
-  const { results, summary } = classifyCorpus(records);
-
-  // Rebuild index then apply regex classifications
-  const buildResult = await buildIndex();
-  const db = await openDb(dbPath);
-  ensureMigrations(db);
-  try {
-    const stmt = db.prepare(`UPDATE bookmarks SET categories = ?, primary_category = ?, github_urls = ? WHERE id = ? AND (primary_category = 'unclassified' OR primary_category IS NULL)`);
-    for (const [id, r] of results) {
-      if (r.categories.length > 0) {
-        stmt.run([r.categories.join(','), r.primary, r.githubUrls.length ? JSON.stringify(r.githubUrls) : null, id]);
-      }
-    }
-    stmt.free();
-    saveDb(db, dbPath);
-  } finally {
-    db.close();
-  }
-  return { ...buildResult, summary };
-}
-
-export interface CategorySample {
+export interface BookmarkSample {
   id: string;
   url: string;
   text: string;
   authorHandle?: string;
-  categories: string;
   githubUrls?: string;
   links?: string;
-}
-
-export async function sampleByCategory(
-  category: string,
-  limit: number,
-  existingDb?: Database,
-): Promise<CategorySample[]> {
-  const db = existingDb ?? await openDb(twitterBookmarksIndexPath());
-  if (!existingDb) ensureMigrations(db);
-  try {
-    const rows = db.exec(
-      `SELECT id, url, text, author_handle, categories, github_urls, links_json
-       FROM bookmarks
-       WHERE categories LIKE ?
-       ORDER BY RANDOM()
-       LIMIT ?`,
-      [`%${category}%`, limit]
-    );
-    if (!rows.length) return [];
-    return rows[0].values.map((r: any) => ({
-      id: r[0] as string,
-      url: r[1] as string,
-      text: r[2] as string,
-      authorHandle: (r[3] as string) ?? undefined,
-      categories: (r[4] as string) ?? '',
-      githubUrls: (r[5] as string) ?? undefined,
-      links: (r[6] as string) ?? undefined,
-    }));
-  } finally {
-    if (!existingDb) db.close();
-  }
-}
-
-export async function getCategoryCounts(existingDb?: Database): Promise<Record<string, number>> {
-  const db = existingDb ?? await openDb(twitterBookmarksIndexPath());
-  if (!existingDb) ensureMigrations(db);
-  try {
-    const rows = db.exec(
-      `SELECT primary_category, COUNT(*) as c FROM bookmarks
-       WHERE primary_category IS NOT NULL
-       GROUP BY primary_category ORDER BY c DESC`
-    );
-    const counts: Record<string, number> = {};
-    for (const row of rows[0]?.values ?? []) {
-      counts[row[0] as string] = row[1] as number;
-    }
-    return counts;
-  } finally {
-    if (!existingDb) db.close();
-  }
-}
-
-export async function getDomainCounts(existingDb?: Database): Promise<Record<string, number>> {
-  const db = existingDb ?? await openDb(twitterBookmarksIndexPath());
-  if (!existingDb) ensureMigrations(db);
-  try {
-    const rows = db.exec(
-      `SELECT primary_domain, COUNT(*) as c FROM bookmarks
-       WHERE primary_domain IS NOT NULL
-       GROUP BY primary_domain ORDER BY c DESC`
-    );
-    const counts: Record<string, number> = {};
-    for (const row of rows[0]?.values ?? []) {
-      counts[row[0] as string] = row[1] as number;
-    }
-    return counts;
-  } finally {
-    if (!existingDb) db.close();
-  }
-}
-
-export async function sampleByDomain(
-  domain: string,
-  limit: number,
-  existingDb?: Database,
-): Promise<CategorySample[]> {
-  const db = existingDb ?? await openDb(twitterBookmarksIndexPath());
-  if (!existingDb) ensureMigrations(db);
-  try {
-    const rows = db.exec(
-      `SELECT id, url, text, author_handle, categories, github_urls, links_json
-       FROM bookmarks
-       WHERE domains LIKE ?
-       ORDER BY RANDOM()
-       LIMIT ?`,
-      [`%${domain}%`, limit]
-    );
-    if (!rows.length) return [];
-    return rows[0].values.map((r: any) => ({
-      id: r[0] as string,
-      url: r[1] as string,
-      text: r[2] as string,
-      authorHandle: (r[3] as string) ?? undefined,
-      categories: (r[4] as string) ?? '',
-      githubUrls: (r[5] as string) ?? undefined,
-      links: (r[6] as string) ?? undefined,
-    }));
-  } finally {
-    if (!existingDb) db.close();
-  }
 }
 
 export async function sampleByAuthor(
   authorHandle: string,
   limit: number,
   existingDb?: Database,
-): Promise<CategorySample[]> {
+): Promise<BookmarkSample[]> {
   const db = existingDb ?? await openDb(twitterBookmarksIndexPath());
   if (!existingDb) ensureMigrations(db);
   try {
     const rows = db.exec(
-      `SELECT id, url, text, author_handle, categories, github_urls, links_json
+      `SELECT id, url, text, author_handle, github_urls, links_json
        FROM bookmarks
        WHERE author_handle = ? COLLATE NOCASE
        ORDER BY COALESCE(posted_at, bookmarked_at) DESC
@@ -889,9 +767,8 @@ export async function sampleByAuthor(
       url: r[1] as string,
       text: r[2] as string,
       authorHandle: (r[3] as string) ?? undefined,
-      categories: (r[4] as string) ?? '',
-      githubUrls: (r[5] as string) ?? undefined,
-      links: (r[6] as string) ?? undefined,
+      githubUrls: (r[4] as string) ?? undefined,
+      links: (r[5] as string) ?? undefined,
     }));
   } finally {
     if (!existingDb) db.close();

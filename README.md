@@ -1,6 +1,6 @@
 # Field Theory CLI
 
-Sync and store locally your X/Twitter bookmarks, likes, Home timeline feed items, and tracked public account timelines. Search bookmarks and likes, browse local timelines, classify bookmarks, and make them available to Claude Code, Codex, or any agent with shell access.
+Sync and store locally your X/Twitter bookmarks, likes, Home timeline feed items, and tracked public account timelines. Search bookmarks and likes, browse local timelines, and make them available to Claude Code, Codex, or any agent with shell access.
 
 Free and open source. Designed for Mac.
 
@@ -34,10 +34,7 @@ ft feed sync --max-pages 2
 # 4. Sync one public account into its own separate archive
 ft accounts sync @elonmusk --limit 50 --retain 90d
 
-# 5. Review followed accounts and search local archives
-ft accounts review --max-pages 1
-ft accounts label @somebody valuable
-ft accounts unfollow @somebody
+# 5. Export one tracked account archive for downstream analysis
 ft accounts export @elonmusk --after 2026-01-01 --before 2026-04-01 --out elonmusk.json
 
 # 6. Search bookmarks, likes, and feed
@@ -46,18 +43,20 @@ ft likes search "distributed systems"
 ft search-all "best practices on claude code"
 ft search-all "claude code" --mode action
 
-# 7. Trim old likes in throttled batches
+# 7. Trim older archives in controlled batches
 ft likes trim --keep 200 --batch-size 25 --pause-seconds 45
+ft bookmarks trim --keep 500 --batch-size 25 --pause-seconds 45
+ft feed trim --keep 5000
 
-# 8. Start the recurring feed collection daemon and inspect semantic coverage
+# 8. Start the recurring feed collection daemon
 ft feed daemon start --every 30m --max-pages 2
-ft feed semantic status
 
-# 8. Explore bookmarks
+# 9. Explore archives
 ft bookmarks viz
+ft likes viz
 ft web
-ft bookmarks categories
 ft bookmarks stats
+ft likes stats
 ```
 
 On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse your browser session from Chrome/Firefox and download data into `~/.ft-bookmarks/`.
@@ -71,16 +70,14 @@ On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse you
 | `ft bookmarks sync` | Download and sync bookmarks from the primary browser-session path |
 | `ft bookmarks sync --rebuild` | Full history re-crawl of bookmarks |
 | `ft bookmarks repair` | Repair missing quoted tweets, truncated text, and invalid bookmark dates |
-| `ft bookmarks sync --classify` | Sync then classify new bookmarks with LLM |
 | `ft likes sync` | Download and sync liked posts into a separate local archive |
+| `ft likes repair` | Repair missing quoted tweets and truncated text in liked posts |
 | `ft accounts sync <handle>` | Download one public account timeline into a separate local archive |
 | `ft feed sync` | Fetch Home timeline tweets into a local read-only feed archive |
-| `ft feed daemon start --every <interval>` | Run recurring feed refresh plus local semantic indexing on one timer |
+| `ft feed daemon start --every <interval>` | Run recurring feed refresh on one timer |
 | `ft feed daemon status` | Show daemon status and the last structured tick summary |
 | `ft feed daemon stop` | Stop the recurring daemon process |
 | `ft feed daemon log` | Show daemon state plus the redacted append-only log location |
-| `ft feed semantic status` | Show embedding provider config and local vector coverage |
-| `ft feed semantic rebuild` | Rebuild vectors for feed, likes, and bookmarks |
 
 ### Search and browse
 
@@ -88,19 +85,20 @@ On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse you
 |---------|-------------|
 | `ft bookmarks search <query>` | Full-text bookmark search with BM25 ranking |
 | `ft search-all <query>` | Hybrid search across feed, likes, and bookmarks |
-| `ft bookmarks list` | Filter by author, date, category, domain |
+| `ft bookmarks list` | Filter by author and date |
 | `ft bookmarks show <id>` | Show one bookmark in detail |
 | `ft bookmarks add <id>` | Create one bookmark on X |
 | `ft bookmarks unbookmark <id>` | Remove a bookmark on X and update the local bookmark archive |
+| `ft bookmarks trim` | Keep only the latest bookmarks and unbookmark older posts on X in throttled batches |
 | `ft likes search <query>` | Full-text search across liked posts |
 | `ft likes list` | Filter liked posts by query, author, and like date |
 | `ft likes show <id>` | Show one liked post in detail |
+| `ft likes add <id>` | Like a post on X and update the local likes archive |
 | `ft likes unlike <id>` | Unlike a post on X and update the local likes archive |
 | `ft likes trim` | Keep only the latest likes and unlike older posts on X in throttled batches |
 | `ft likes status` | Show likes archive status |
-| `ft accounts review` | Refresh your following list and surface conservative unfollow candidates |
-| `ft accounts label <handle> <value>` | Store a manual value label (`valuable`, `not-valuable`, `neutral`) for a reviewed account |
-| `ft accounts unfollow <handle>` | Unfollow one reviewed account on X and reconcile the local review cache |
+| `ft likes stats` | Top liked authors, languages, date range |
+| `ft likes viz` | Terminal dashboard with sparklines and liked-post patterns |
 | `ft accounts export <handle>` | Export one tracked account archive as JSON for agent or research workflows |
 | `ft accounts status <handle>` | Show one tracked account archive status |
 | `ft accounts list <handle>` | Browse cached tweets for one tracked account |
@@ -108,32 +106,10 @@ On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse you
 | `ft feed list` | Browse cached Home timeline tweets with local paging |
 | `ft feed show <id>` | Show one cached feed item in detail |
 | `ft feed status` | Show feed archive status |
+| `ft feed trim` | Keep only the latest cached feed items and remove older local entries |
 | `ft web` | Launch a local web UI for hybrid search plus archive browsing |
-| `ft bookmarks sample <category>` | Random sample from a category |
 | `ft bookmarks stats` | Top authors, languages, date range |
-| `ft bookmarks viz` | Terminal dashboard with sparklines, categories, and domains |
-| `ft bookmarks categories` | Show category distribution |
-| `ft bookmarks domains` | Subject domain distribution |
-
-### Classification
-
-| Command | Description |
-|---------|-------------|
-| `ft bookmarks classify` | Classify by category and domain using LLM |
-| `ft bookmarks classify --regex` | Classify by category using simple regex |
-| `ft bookmarks classify-domains` | Classify by subject domain only (LLM) |
-| `ft bookmarks model` | View or change the default LLM engine |
-
-### Knowledge base
-
-| Command | Description |
-|---------|-------------|
-| `ft md` | Export bookmarks as individual markdown files |
-| `ft wiki` | Compile a Karpathy-style interlinked knowledge base |
-| `ft ask <question>` | Ask questions against the knowledge base |
-| `ft ask <question> --save` | Ask and save the answer as a concept page |
-| `ft lint` | Health-check the wiki for broken links and missing pages |
-| `ft lint --fix` | Auto-fix fixable wiki issues |
+| `ft bookmarks viz` | Terminal dashboard with sparklines and archive patterns |
 
 ### Agent integration
 
@@ -147,10 +123,10 @@ On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse you
 
 | Command | Description |
 |---------|-------------|
-| `ft bookmarks index` | Rebuild search index from JSONL cache (preserves classifications) |
-| `ft bookmarks model` | View or change the default LLM engine for bookmark classification |
+| `ft bookmarks index` | Rebuild search index from JSONL cache (preserves local enrichment fields) |
 | `ft likes index` | Rebuild the likes search index from the likes cache |
-| `ft bookmarks fetch-media` | Download media assets (static images only) |
+| `ft bookmarks fetch-media` | Download bookmark media assets |
+| `ft likes fetch-media` | Download liked-post media assets |
 | `ft bookmarks status` | Show sync status and data location |
 | `ft path` | Print data directory path |
 
@@ -178,11 +154,8 @@ Works with Claude Code, Codex, or any agent with shell access.
 # Sync every morning at 7am
 0 7 * * * ft bookmarks sync
 
-# Sync and classify every morning
-0 7 * * * ft bookmarks sync --classify
-
-# Refresh feed and local semantic retrieval state every 30 minutes via cron
-*/30 * * * * ft feed sync --max-pages 1 && ft feed semantic rebuild
+# Refresh feed every 30 minutes via cron
+*/30 * * * * ft feed sync --max-pages 1
 
 # Refresh one tracked public account every 20 minutes and keep only the last 30 days locally
 */20 * * * * ft accounts sync @elonmusk --limit 50 --retain 30d
@@ -194,8 +167,6 @@ ft feed daemon start --every 30m --max-pages 2
 `ft accounts sync` is explicit per account in v1. It stores data under a separate `accounts/<user-id>/` archive, prunes rows older than the `--retain` window during sync, and does not add tracked-account tweets into `ft search-all` yet.
 
 `ft accounts export` stays local-first. It reads one tracked account's existing local archive, filters by `--after` / `--before` in `YYYY-MM-DD` format, and emits JSON for downstream agent or research workflows. It does not perform sync or LLM analysis itself.
-
-`ft accounts review` uses a separate `following/` archive family. It refreshes your current following list, reuses manual labels and cached deep-scan evidence when present, and only recommends conservative unfollows after confirming inactivity with recent timeline evidence.
 
 ## Data
 
@@ -218,14 +189,6 @@ All data is stored locally at `~/.ft-bookmarks/`:
       timeline.db          # SQLite index for one account timeline
       timeline-meta.json   # last sync summary, retention, latest tweet snapshot
       timeline-state.json  # sync checkpoint state for one account
-  following/
-    snapshot.jsonl         # latest following-list snapshot
-    labels.json           # manual value labels by followed account user id
-    review-results.jsonl  # latest scored review results
-    review-state.json     # review run and following-sync metadata
-    review.db             # SQLite index for followed-account review state
-    accounts/
-      <user-id>.json      # cached deep-scan evidence for reviewed accounts
   feed.jsonl              # raw Home timeline cache (tweet-only entries)
   feed.db                 # SQLite index for local feed browsing
   feed-meta.json          # feed sync metadata
@@ -234,9 +197,6 @@ All data is stored locally at `~/.ft-bookmarks/`:
   archive.db              # unified archive index for web/search/assistant consumers
   feed-daemon-state.json  # recurring daemon status and last tick summary
   feed-daemon.log         # append-only daemon loop log
-  semantic.lance/         # local LanceDB vector store for semantic feed retrieval
-  semantic-meta.json      # embedding provider/model and semantic coverage counts
-  md/                     # markdown knowledge base (ft wiki / ft md)
 ```
 
 Override the location with `FT_DATA_DIR`:
@@ -244,6 +204,8 @@ Override the location with `FT_DATA_DIR`:
 ```bash
 export FT_DATA_DIR=/path/to/custom/dir
 ```
+
+If you used an older build that created `~/.ft-bookmarks/following/`, that directory is now legacy data and can be removed manually.
 
 To remove all data: `rm -rf ~/.ft-bookmarks`
 
@@ -258,17 +220,19 @@ ft likes unlike <tweet-id>
 
 Both commands reuse your browser-authenticated X web session, then reconcile the matching local archive entry and index. Remote write actions now apply one conservative retry policy for transient failures only: network/transport errors, HTTP `429`, and HTTP `5xx` are retried up to 2 extra times with short `1s -> 3s` backoff, while auth failures such as `401/403` still fail fast. Bookmark-create `404` responses are now surfaced as likely X web contract/header mismatches rather than being mislabeled as temporary upstream issues.
 
-For bulk likes cleanup, use the formal trim command:
+For bulk cleanup, use the formal trim commands:
 
 ```bash
 ft likes trim --keep 200 --batch-size 25 --pause-seconds 45
+ft bookmarks trim --keep 500 --batch-size 25 --pause-seconds 45
+ft feed trim --keep 5000
 ```
 
-The command recomputes the trim set from your current local archive on each run, so it is safe to resume after an interruption. It unlikes older posts on X in batches, rewrites `likes.jsonl`, updates `likes-meta.json`, and rebuilds `likes.db` once per batch.
+The likes and bookmarks trim commands recompute their trim set from the current local archive on each run, so they are safe to resume after an interruption. They unlike/unbookmark older posts on X in batches, rewrite the matching JSONL/meta files, and rebuild the matching SQLite index once per batch. `ft feed trim` is local-only: it removes older cached Home timeline items, prunes matching feed context bundles, updates `feed-meta.json`, and rebuilds `feed.db`.
 
 ## Feed collection daemon
 
-Use `feed daemon start` when you want recurring Home timeline collection plus local semantic-index maintenance:
+Use `feed daemon start` when you want recurring Home timeline collection:
 
 ```bash
 # Keep running every 30 minutes
@@ -277,30 +241,14 @@ ft feed daemon start --every 30m --max-pages 2
 # Inspect or stop the daemon
 ft feed daemon status
 ft feed daemon stop
-
-# Inspect or rebuild semantic retrieval state
-ft feed semantic status
-ft feed semantic rebuild
 ```
 
-Semantic feed matching is embedding-based. By default the CLI is preconfigured for Aliyun Bailian `text-embedding-v4` through its OpenAI-compatible embeddings API.
-
-```bash
-export FT_EMBEDDING_API_KEY=...
-# optional overrides
-export FT_EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-export FT_EMBEDDING_MODEL=text-embedding-v4
-export FT_EMBEDDING_PROVIDER=aliyun-bailian
-export FT_EMBEDDING_BATCH_SIZE=32
-```
-
-The daemon runs one simple loop: refresh feed, rebuild semantic vectors for newly seen feed items, then persist a tick summary. Each run can:
+The daemon runs one simple loop: refresh feed, then persist a tick summary. Each run can:
 
 - sync a bounded amount of fresh feed data
-- refresh local semantic retrieval coverage for newly collected feed items
-- write durable local collection/indexing state and append-only logs for later inspection
+- write durable local collection state and append-only logs for later inspection
 
-`ft feed daemon status` shows whether the recurring loop is alive plus the last stage, outcome, error kind, duration, and redacted summary for the most recent tick. `feed-daemon.log` remains an append-only local artifact for stage-by-stage follow-up, but transport secrets are redacted before errors reach status/log output. `ft feed semantic status` shows whether embeddings are configured and how much local vector coverage exists.
+`ft feed daemon status` shows whether the recurring loop is alive plus the last stage, outcome, error kind, duration, and redacted summary for the most recent tick. `feed-daemon.log` remains an append-only local artifact for stage-by-stage follow-up, but transport secrets are redacted before errors reach status/log output.
 
 ## Hybrid search
 
@@ -342,27 +290,13 @@ The default web view is now search-first:
 - keep bookmarks/likes archive browsing available as separate tabs
 - keep the list pane and detail pane independently scrollable on desktop
 
-## Categories
-
-| Category | What it catches |
-|----------|----------------|
-| **tool** | GitHub repos, CLI tools, npm packages, open-source projects |
-| **security** | CVEs, vulnerabilities, exploits, supply chain |
-| **technique** | Tutorials, demos, code patterns, "how I built X" |
-| **launch** | Product launches, announcements, "just shipped" |
-| **research** | ArXiv papers, studies, academic findings |
-| **opinion** | Takes, analysis, commentary, threads |
-| **commerce** | Products, shopping, physical goods |
-
-Use `ft bookmarks classify` for LLM-powered classification that catches what regex misses.
-
 ## Platform support
 
 | Feature | macOS | Linux | Windows |
 |---------|-------|-------|---------|
 | Session sync (`ft bookmarks sync`, `ft likes sync`) | Chrome, Brave, Arc, Firefox | Firefox | Firefox |
 | Search, list, likes archive | Yes | Yes | Yes |
-| Bookmark classify, viz, wiki | Yes | Yes | Yes |
+| Bookmark viz, web UI, tracked-account export | Yes | Yes | Yes |
 
 Session sync extracts cookies from your browser's local database. Use `ft bookmarks sync --browser <name>` to pick a browser.
 
@@ -378,7 +312,7 @@ Session sync extracts cookies from your browser's local database. Use `ft bookma
 
 **The feed archive sync uses the same browser-authenticated X web session path.** In v1 it is read-only, CLI-first, and stores tweet-only Home timeline entries for local browsing.
 
-**Remote unlike, unbookmark, and likes trim use the same browser-authenticated X web session path.** On success, the CLI also reconciles the matching local cached records and rebuilds the relevant search index. Single-item remote write actions now retry only transient failures (`network`, `429`, `5xx`) with bounded backoff before surfacing an error.
+**Remote unlike, unbookmark, likes trim, and bookmarks trim use the same browser-authenticated X web session path.** On success, the CLI also reconciles the matching local cached records and rebuilds the relevant search index. Single-item remote write actions now retry only transient failures (`network`, `429`, `5xx`) with bounded backoff before surfacing an error.
 
 ## License
 

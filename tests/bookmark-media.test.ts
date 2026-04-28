@@ -4,11 +4,11 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fetchBookmarkMediaBatch } from '../src/bookmark-media.js';
+import { fetchBookmarkMediaBatch, fetchLikeMediaBatch } from '../src/bookmark-media.js';
 
-async function withMediaDataDir(records: any[], fn: () => Promise<void>): Promise<void> {
+async function withMediaDataDir(records: any[], fn: () => Promise<void>, source: 'bookmarks' | 'likes' = 'bookmarks'): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), 'ft-media-test-'));
-  await writeFile(path.join(dir, 'bookmarks.jsonl'), records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  await writeFile(path.join(dir, `${source}.jsonl`), records.map((r) => JSON.stringify(r)).join('\n') + '\n');
 
   const saved = process.env.FT_DATA_DIR;
   process.env.FT_DATA_DIR = dir;
@@ -74,6 +74,50 @@ test('fetchBookmarkMediaBatch downloads post media from GraphQL mediaObjects sha
         videoUrl,
       ].sort());
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchLikeMediaBatch downloads liked post media into likes manifest', async () => {
+  const photoUrl = 'https://pbs.twimg.com/media/liked.jpg';
+  const records = [{
+    id: '2',
+    tweetId: '2',
+    url: 'https://x.com/bob/status/2',
+    text: 'liked media test',
+    authorHandle: 'bob',
+    syncedAt: '2026-04-09T00:00:00.000Z',
+    media: [photoUrl],
+    links: [],
+    tags: [],
+    ingestedVia: 'graphql',
+  }];
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    if ((init?.method ?? 'GET') === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: { 'content-length': '3', 'content-type': 'image/jpeg' },
+      });
+    }
+    return new Response(Uint8Array.from([1, 2, 3]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  };
+
+  try {
+    await withMediaDataDir(records, async () => {
+      const manifest = await fetchLikeMediaBatch({ limit: 10, maxBytes: 1024 });
+
+      assert.equal(manifest.downloaded, 1);
+      assert.equal(manifest.entries[0].source, 'likes');
+      assert.equal(manifest.entries[0].recordId, '2');
+      assert.equal(manifest.entries[0].sourceUrl, photoUrl);
+      assert.match(manifest.entries[0].localPath ?? '', /likes-media/);
+    }, 'likes');
   } finally {
     globalThis.fetch = originalFetch;
   }

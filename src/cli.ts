@@ -4,28 +4,22 @@ import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service
 import { getLikesStatusView, formatLikesStatus } from './likes-service.js';
 import { formatFeedConversationSummary, getFeedStatusView, formatFeedStatus } from './feed-service.js';
 import { getAccountTimelineStatusView, formatAccountTimelineStatus } from './account-timeline-service.js';
-import { formatAccountReviewResults } from './account-review-service.js';
 import { formatFeedDaemonStatus, getFeedDaemonState, startFeedDaemon, stopFeedDaemon } from './feed-daemon.js';
-import { formatSemanticStatus, getSemanticStatusView, rebuildSemanticIndex } from './semantic-indexer.js';
-import { syncLikesGraphQL, type LikesSyncProgress } from './graphql-likes.js';
+import { fetchLikeRecordViaSyndication, syncLikesGraphQL, type LikesSyncProgress } from './graphql-likes.js';
 import { syncFeedGraphQL, type FeedSyncProgress } from './graphql-feed.js';
 import { syncAccountTimelineGraphQL } from './graphql-account-timeline.js';
 import { syncFeedConversationContext } from './feed-context.js';
-import { bookmarkTweet, unfollowAccount, unlikeTweet, unbookmarkTweet } from './graphql-actions.js';
-import { syncFollowingSnapshot } from './graphql-following.js';
+import { bookmarkTweet, likeTweet, unlikeTweet, unbookmarkTweet } from './graphql-actions.js';
 import { fetchBookmarkRecordViaSyndication, type SyncProgress, type GapFillProgress } from './graphql-bookmarks.js';
 import { syncBookmarks } from './bookmark-sync.js';
 import { repairBookmarks } from './bookmark-repair.js';
-import { fetchBookmarkMediaBatch } from './bookmark-media.js';
+import { repairLikes } from './like-repair.js';
+import { fetchBookmarkMediaBatch, fetchLikeMediaBatch } from './bookmark-media.js';
 import {
   buildIndex,
   searchBookmarks,
   formatSearchResults,
   getStats,
-  classifyAndRebuild,
-  getCategoryCounts,
-  sampleByCategory,
-  getDomainCounts,
   listBookmarks,
   getBookmarkById,
 } from './bookmarks-db.js';
@@ -34,26 +28,18 @@ import {
   searchLikes,
   listLikes,
   getLikeById,
+  getLikeStats,
   formatLikeSearchResults,
 } from './likes-db.js';
-import { listFeed, getFeedById } from './feed-db.js';
+import { buildFeedIndex, listFeed, getFeedById, searchFeed } from './feed-db.js';
 import { listAccountTimeline, getAccountTimelineById } from './account-timeline-db.js';
 import { exportAccountTimeline } from './account-export.js';
-import { buildFollowingReviewIndex, getFollowingReviewItemByHandle } from './following-review-db.js';
-import { runAccountReview } from './account-review.js';
 import { runHybridSearch } from './hybrid-search.js';
 import type { HybridSearchMode, HybridSearchResult, HybridSearchScope } from './search-types.js';
-import { formatClassificationSummary } from './bookmark-classify.js';
-import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
-import { resolveEngine, detectAvailableEngines } from './engine.js';
-import { loadPreferences, savePreferences } from './preferences.js';
-import { compileMd } from './md.js';
-import { askMd } from './md-ask.js';
-import { lintMd, fixLintIssues } from './md-lint.js';
-import { exportBookmarks } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
-import { removeBookmarkFromArchive, removeLikeFromArchive, upsertBookmarkInArchive } from './archive-actions.js';
-import { reconcileUnfollowedAccount } from './following-actions.js';
+import { renderLikeViz } from './likes-viz.js';
+import { removeBookmarkFromArchive, removeLikeFromArchive, upsertBookmarkInArchive, upsertLikeInArchive } from './archive-actions.js';
+import { exportBookmarks, exportFeed, exportLikes } from './archive-export.js';
 import { listBrowserIds } from './browsers.js';
 import {
   dataDir,
@@ -65,15 +51,15 @@ import {
   twitterBookmarksIndexPath,
   twitterFeedIndexPath,
   twitterLikesIndexPath,
-  mdDir,
 } from './paths.js';
 import { resolveTrackedAccount } from './account-registry.js';
 import { PromptCancelledError, promptText } from './prompt.js';
-import { resolveFollowedAccountFromCache, setFollowingLabel } from './following-review-state.js';
 import { readFeedConversationBundle } from './feed-context-store.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { assertWebAssetsBuilt, startWebServer } from './web.js';
 import { trimLikes } from './likes-trim.js';
+import { trimBookmarks } from './bookmark-trim.js';
+import { trimFeed } from './feed-trim.js';
 import { loadEnv } from './config.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -142,16 +128,18 @@ const FRIENDLY_STOP_REASONS: Record<string, string> = {
 };
 
 const BOOKMARK_REPAIR_FAILURE_LOG = 'bookmark-repair-failures.json';
+const LIKE_REPAIR_FAILURE_LOG = 'like-repair-failures.json';
 
 function friendlyStopReason(raw?: string): string {
   if (!raw) return 'Sync complete.';
   return FRIENDLY_STOP_REASONS[raw] ?? `Sync complete \u2014 ${raw}`;
 }
 
-function writeBookmarkRepairFailureLog(
+function writeRepairFailureLog(
+  filename: string,
   failures: Array<{ tweetId: string; reason: string; url: string }>,
 ): string {
-  const logPath = path.join(dataDir(), BOOKMARK_REPAIR_FAILURE_LOG);
+  const logPath = path.join(dataDir(), filename);
   const byReason: Record<string, number> = {};
   for (const failure of failures) {
     const reason = String(failure.reason);
@@ -159,6 +147,18 @@ function writeBookmarkRepairFailureLog(
   }
   fs.writeFileSync(logPath, JSON.stringify({ failures, summary: byReason }, null, 2));
   return logPath;
+}
+
+function writeBookmarkRepairFailureLog(
+  failures: Array<{ tweetId: string; reason: string; url: string }>,
+): string {
+  return writeRepairFailureLog(BOOKMARK_REPAIR_FAILURE_LOG, failures);
+}
+
+function writeLikeRepairFailureLog(
+  failures: Array<{ tweetId: string; reason: string; url: string }>,
+): string {
+  return writeRepairFailureLog(LIKE_REPAIR_FAILURE_LOG, failures);
 }
 
 function formatHybridSearchResults(results: HybridSearchResult[], mode: HybridSearchMode): string {
@@ -175,6 +175,25 @@ function formatHybridSearchResults(results: HybridSearchResult[], mode: HybridSe
     .join('\n\n');
 }
 
+function formatFeedSearchResults(results: Array<{
+  id: string;
+  url: string;
+  text: string;
+  authorHandle?: string;
+  postedAt?: string | null;
+}>): string {
+  if (results.length === 0) return 'No results found.';
+
+  return results
+    .map((result, index) => {
+      const author = result.authorHandle ? `@${result.authorHandle}` : '@?';
+      const date = result.postedAt?.slice(0, 10) ?? '?';
+      const text = result.text.length > 140 ? `${result.text.slice(0, 140)}...` : result.text;
+      return `${index + 1}. [${date}] ${author}\n   ${text}\n   ${result.url}`;
+    })
+    .join('\n\n');
+}
+
 function warnIfEmpty(totalBookmarks: number): void {
   if (totalBookmarks > 0) return;
   console.log(`  \u26a0 No bookmarks were found. This usually means:`);
@@ -182,6 +201,19 @@ function warnIfEmpty(totalBookmarks: number): void {
   console.log(`    \u2022 Keychain/keyring access was denied`);
   console.log(`    \u2022 You may be logged into a different profile than the one with X/Twitter`);
   console.log(`    \u2022 Try: ft bookmarks sync --cookies <ct0> <auth_token>  (paste from DevTools)\n`);
+}
+
+function writeJsonExportOutput(payload: unknown, outputPathRaw?: string): void {
+  const json = JSON.stringify(payload, null, 2);
+  if (!outputPathRaw) {
+    console.log(json);
+    return;
+  }
+
+  const outputPath = path.resolve(String(outputPathRaw));
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, `${json}\n`);
+  console.log(`\n  Output: ${outputPath}\n`);
 }
 
 // ── Update checker ────────────────────────────────────────────────────────
@@ -321,6 +353,9 @@ function shouldSuppressPreActionOutput(argv: string[]): boolean {
   const args = argv.slice(2);
   const commandPath = args.filter((arg) => !arg.startsWith('-')).slice(0, 2).join(' ');
   if (commandPath === 'skill show') return true;
+  if (commandPath === 'bookmarks export') return true;
+  if (commandPath === 'likes export') return true;
+  if (commandPath === 'feed export') return true;
   if (commandPath === 'accounts export' && !args.includes('--out')) return true;
   if (args.includes('--json')) return true;
   return false;
@@ -330,7 +365,7 @@ export function showWelcome(): void {
   console.log(logo());
   console.log(`
   Save a local copy of your X/Twitter bookmarks and likes. Search them,
-  classify bookmarks, and make them available to any AI agent.
+  browse them locally, and make them available to any AI agent.
   Your data never leaves your machine.
 
   Get started:
@@ -351,15 +386,6 @@ export async function showDashboard(): Promise<void> {
     console.log(`
   \x1b[1m${view.bookmarkCount.toLocaleString()}\x1b[0m bookmarks  \x1b[2m\u2502\x1b[0m  last synced \x1b[1m${ago}\x1b[0m  \x1b[2m\u2502\x1b[0m  ${dataDir()}
 `);
-
-    if (fs.existsSync(twitterBookmarksIndexPath())) {
-      const counts = await getCategoryCounts();
-      const cats = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 7);
-      if (cats.length > 0) {
-        const catLine = cats.map(([c, n]) => `${c} (${n})`).join(' \u00b7 ');
-        console.log(`  \x1b[2m${catLine}\x1b[0m`);
-      }
-    }
 
   console.log(`
   \x1b[2mSync now:\x1b[0m     ft bookmarks sync
@@ -510,20 +536,6 @@ async function requireAccountIndex(handle: string): Promise<{ userId: string; cu
   return account;
 }
 
-async function requireFollowedAccount(handle: string): Promise<{ userId: string; handle: string; name?: string } | null> {
-  const account = await resolveFollowedAccountFromCache(handle);
-  if (!account) {
-    console.log(`\n  No reviewed follow cache found for ${handle}.\n\n  Run: ft accounts review\n`);
-    process.exitCode = 1;
-    return null;
-  }
-  return {
-    userId: account.userId,
-    handle: account.handle,
-    name: account.name,
-  };
-}
-
 /** Wrap an async action with graceful error handling. */
 function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promise<void> {
   return async (...args: any[]) => {
@@ -635,6 +647,48 @@ export function buildCli() {
     }
   }
 
+  async function runLikeRepairCommand(
+    options: { delayMs?: number },
+  ): Promise<void> {
+    const startTime = Date.now();
+    process.stderr.write('  Repairing likes enrichment gaps (quoted tweets, truncated text)...\n');
+    let lastProgress: GapFillProgress = { done: 0, total: 0, quotedFetched: 0, textExpanded: 0, failed: 0 };
+    const spinner = createSpinner(() => {
+      const p = lastProgress;
+      const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0;
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      return `${p.done}/${p.total} (${pct}%) │ ${p.quotedFetched} quoted │ ${p.textExpanded} expanded │ ${p.failed} failed │ ${elapsed}s`;
+    });
+    const result = await runWithSpinner(spinner, () => repairLikes({
+      delayMs: Number(options.delayMs) || 300,
+      onProgress: (progress: GapFillProgress) => {
+        lastProgress = progress;
+        spinner.update();
+      },
+    }));
+
+    if (result.total === 0) {
+      console.log('  No repair needed — likes are already fully enriched.');
+      return;
+    }
+
+    if (result.quotedTweetsFilled > 0) console.log(`  ✓ ${result.quotedTweetsFilled} quoted tweets repaired`);
+    if (result.textExpanded > 0) console.log(`  ✓ ${result.textExpanded} truncated texts expanded`);
+    if (result.failed > 0) {
+      const logPath = writeLikeRepairFailureLog(result.failures);
+      const summary = JSON.parse(fs.readFileSync(logPath, 'utf-8')) as { summary: Record<string, number> };
+
+      console.log(`  ${result.failed} unavailable:`);
+      for (const [reason, count] of Object.entries(summary.summary)) {
+        console.log(`    • ${count} ${reason}`);
+      }
+      console.log(`  Details: ${logPath}`);
+    }
+    if (result.likedAtMissing > 0) {
+      console.log(`  ${result.likedAtMissing} likes still missing a reliable like date`);
+    }
+  }
+
   async function rebuildIndex(): Promise<number> {
     process.stderr.write('  Building search index...\n');
     const idx = await buildIndex();
@@ -642,42 +696,9 @@ export function buildCli() {
     return idx.newRecords;
   }
 
-  async function classifyNew(): Promise<void> {
-    const engine = await resolveEngine();
-
-    const start = Date.now();
-    process.stderr.write('  Classifying new bookmarks (categories)...\n');
-    const catResult = await classifyWithLlm({
-      engine,
-      onBatch: (done: number, total: number) => {
-        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-        const elapsed = Math.round((Date.now() - start) / 1000);
-        process.stderr.write(`  Categories: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
-      },
-    });
-    if (catResult.classified > 0) {
-      process.stderr.write(`  \u2713 ${catResult.classified} categorized\n`);
-    }
-
-    const domStart = Date.now();
-    process.stderr.write('  Classifying new bookmarks (domains)...\n');
-    const domResult = await classifyDomainsWithLlm({
-      engine,
-      all: false,
-      onBatch: (done: number, total: number) => {
-        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-        const elapsed = Math.round((Date.now() - domStart) / 1000);
-        process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
-      },
-    });
-    if (domResult.classified > 0) {
-      process.stderr.write(`  \u2713 ${domResult.classified} domains assigned\n`);
-    }
-  }
-
   program
     .name('ft')
-    .description('Self-custody for your X/Twitter bookmarks, likes, and feed. Sync, search, classify bookmarks, and explore locally.')
+    .description('Self-custody for your X/Twitter bookmarks, likes, and feed. Sync, search, and explore locally.')
     .version(getLocalVersion())
     .showHelpAfterError()
     .hook('preAction', () => {
@@ -697,7 +718,6 @@ export function buildCli() {
     .description('Sync bookmarks from X into your local archive')
     .option('--rebuild', 'Full re-crawl of all bookmarks', false)
     .option('--yes', 'Skip confirmation prompts', false)
-    .option('--classify', 'Classify new bookmarks with LLM after syncing', false)
     .option('--max-pages <n>', 'Max pages to fetch (default: unlimited)', (v: string) => Number(v))
     .option('--target-adds <n>', 'Stop after N new bookmarks', (v: string) => Number(v))
     .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
@@ -788,19 +808,14 @@ export function buildCli() {
         warnIfEmpty(result.totalBookmarks);
 
         const newCount = await rebuildIndex();
-        if (options.classify && newCount > 0) {
-          await classifyNew();
-        }
 
         if (firstRun) {
           console.log(`\n  Next steps:`);
-          console.log(`        ft bookmarks classify              Classify by category and domain (LLM)`);
-          console.log(`        ft bookmarks classify --regex      Classify by category (simple)`);
-          console.log(`\n  Explore:`);
           console.log(`        ft bookmarks search "machine learning"`);
+          console.log(`        ft bookmarks list --author @karpathy --limit 10`);
+          console.log(`\n  Explore:`);
           console.log(`        ft bookmarks viz`);
           console.log(`        ft web`);
-          console.log(`        ft bookmarks categories`);
           console.log(`\n  You can also just tell Claude to use the ft CLI to search and`);
           console.log(`  explore your bookmarks. It already knows how.\n`);
         }
@@ -900,8 +915,6 @@ export function buildCli() {
     .option('--author <handle>', 'Filter by author handle')
     .option('--after <date>', 'Posted after (YYYY-MM-DD)')
     .option('--before <date>', 'Posted before (YYYY-MM-DD)')
-    .option('--category <category>', 'Filter by category')
-    .option('--domain <domain>', 'Filter by domain')
     .option('--limit <n>', 'Max results', (v: string) => Number(v), 30)
     .option('--offset <n>', 'Offset into results', (v: string) => Number(v), 0)
     .option('--json', 'JSON output')
@@ -912,8 +925,6 @@ export function buildCli() {
         author: options.author ? String(options.author) : undefined,
         after: options.after ? String(options.after) : undefined,
         before: options.before ? String(options.before) : undefined,
-        category: options.category ? String(options.category) : undefined,
-        domain: options.domain ? String(options.domain) : undefined,
         limit: Number(options.limit) || 30,
         offset: Number(options.offset) || 0,
       });
@@ -922,9 +933,8 @@ export function buildCli() {
         return;
       }
       for (const item of items) {
-        const tags = [item.primaryCategory, item.primaryDomain].filter(Boolean).join(' \u00b7 ');
         const summary = item.text.length > 120 ? `${item.text.slice(0, 117)}...` : item.text;
-        console.log(`${item.id}  ${item.authorHandle ? `@${item.authorHandle}` : '@?'}  ${item.postedAt?.slice(0, 10) ?? '?'}${tags ? `  ${tags}` : ''}`);
+        console.log(`${item.id}  ${item.authorHandle ? `@${item.authorHandle}` : '@?'}  ${item.postedAt?.slice(0, 10) ?? '?'}`);
         console.log(`  ${summary}`);
         console.log(`  ${item.url}`);
         console.log();
@@ -954,8 +964,27 @@ export function buildCli() {
       console.log(item.url);
       console.log(item.text);
       if (item.links.length) console.log(`links: ${item.links.join(', ')}`);
-      if (item.categories) console.log(`categories: ${item.categories}`);
-      if (item.domains) console.log(`domains: ${item.domains}`);
+    }));
+
+  bookmarks
+    .command('export')
+    .description('Export bookmarks as canonical archive JSON')
+    .option('--query <query>', 'Text query (FTS5 syntax)')
+    .option('--author <handle>', 'Filter by author handle')
+    .option('--after <date>', 'Posted after (YYYY-MM-DD)')
+    .option('--before <date>', 'Posted before (YYYY-MM-DD)')
+    .option('--limit <n>', 'Max results', (v: string) => Number(v))
+    .option('--out <path>', 'Write JSON to this file instead of stdout')
+    .action(safe(async (options) => {
+      if (!requireIndex()) return;
+      const payload = await exportBookmarks({
+        query: options.query ? String(options.query) : undefined,
+        author: options.author ? String(options.author) : undefined,
+        after: options.after ? String(options.after) : undefined,
+        before: options.before ? String(options.before) : undefined,
+        limit: options.limit != null ? Number(options.limit) : undefined,
+      });
+      writeJsonExportOutput(payload, options.out ? String(options.out) : undefined);
     }));
 
   // ── stats ───────────────────────────────────────────────────────────────
@@ -1020,179 +1049,12 @@ export function buildCli() {
       });
     }));
 
-  // ── classify ────────────────────────────────────────────────────────────
-
-  bookmarks
-    .command('classify')
-    .description('Classify bookmarks by category and domain using LLM (requires claude or codex CLI)')
-    .option('--regex', 'Use simple regex classification instead of LLM')
-    .action(safe(async (options) => {
-      if (!requireData()) return;
-      if (options.regex) {
-        process.stderr.write('Classifying bookmarks (regex)...\n');
-        const result = await classifyAndRebuild();
-        console.log(`Indexed ${result.recordCount} bookmarks \u2192 ${result.dbPath}`);
-        console.log(formatClassificationSummary(result.summary));
-      } else {
-        const engine = await resolveEngine();
-
-        let catStart = Date.now();
-        process.stderr.write('Classifying categories with LLM (batches of 50, ~2 min per batch)...\n');
-        const catResult = await classifyWithLlm({
-          engine,
-          onBatch: (done: number, total: number) => {
-            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-            const elapsed = Math.round((Date.now() - catStart) / 1000);
-            process.stderr.write(`  Categories: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
-          },
-        });
-        console.log(`\nEngine: ${catResult.engine}`);
-        console.log(`Categories: ${catResult.classified}/${catResult.totalUnclassified} classified`);
-
-        let domStart = Date.now();
-        process.stderr.write('\nClassifying domains with LLM (batches of 50, ~2 min per batch)...\n');
-        const domResult = await classifyDomainsWithLlm({
-          engine,
-          all: false,
-          onBatch: (done: number, total: number) => {
-            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-            const elapsed = Math.round((Date.now() - domStart) / 1000);
-            process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
-          },
-        });
-        console.log(`\nDomains: ${domResult.classified}/${domResult.totalUnclassified} classified`);
-      }
-    }));
-
-  // ── classify-domains ────────────────────────────────────────────────────
-
-  bookmarks
-    .command('classify-domains')
-    .description('Classify bookmarks by subject domain using LLM (ai, finance, etc.)')
-    .option('--all', 'Re-classify all bookmarks, not just missing')
-    .action(safe(async (options) => {
-      if (!requireData()) return;
-      const engine = await resolveEngine();
-      const start = Date.now();
-      process.stderr.write('Classifying bookmark domains with LLM (batches of 50, ~2 min per batch)...\n');
-      const result = await classifyDomainsWithLlm({
-        engine,
-        all: options.all ?? false,
-        onBatch: (done: number, total: number) => {
-          const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-          const elapsed = Math.round((Date.now() - start) / 1000);
-          process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
-        },
-      });
-      console.log(`\nDomains: ${result.classified}/${result.totalUnclassified} classified`);
-    }));
-
-  // ── model ───────────────────────────────────────────────────────────────
-
-  bookmarks
-    .command('model')
-    .description('View or change the default LLM engine for classification')
-    .argument('[engine]', 'Set default engine directly (e.g. claude, codex)')
-    .action(safe(async (engineArg?: string) => {
-      const available = detectAvailableEngines();
-      const prefs = loadPreferences();
-
-      if (available.length === 0) {
-        console.log('  No LLM engines found on PATH.');
-        console.log('  Install one of:');
-        console.log('    - Claude Code: https://docs.anthropic.com/en/docs/claude-code');
-        console.log('    - Codex CLI:   https://github.com/openai/codex');
-        return;
-      }
-
-      // Direct set: ft model claude
-      if (engineArg) {
-        if (!available.includes(engineArg)) {
-          console.log(`  "${engineArg}" is not available. Found: ${available.join(', ')}`);
-          process.exitCode = 1;
-          return;
-        }
-        savePreferences({ ...prefs, defaultEngine: engineArg });
-        console.log(`  \u2713 Default model set to ${engineArg}`);
-        return;
-      }
-
-      // Interactive picker
-      console.log('  Available engines:\n');
-      for (const name of available) {
-        const marker = name === prefs.defaultEngine ? ' (default)' : '';
-        console.log(`    ${name}${marker}`);
-      }
-      console.log();
-
-      if (!process.stdin.isTTY) {
-        if (prefs.defaultEngine) console.log(`  Current default: ${prefs.defaultEngine}`);
-        console.log('  Set with: ft bookmarks model <engine>');
-        return;
-      }
-
-      const answer = await promptText('  Select default: ');
-      if (answer.kind === 'interrupt') {
-        throw new PromptCancelledError('Cancelled. No default model saved.', 130);
-      }
-      if (answer.kind === 'close' || !answer.value) {
-        console.log('  No default model saved.');
-        return;
-      }
-
-      if (available.includes(answer.value)) {
-        savePreferences({ ...prefs, defaultEngine: answer.value });
-        console.log(`  \u2713 Default model set to ${answer.value}`);
-      } else {
-        console.log(`  "${answer.value}" is not available. Found: ${available.join(', ')}`);
-        process.exitCode = 1;
-      }
-    }));
-
-  // ── categories ──────────────────────────────────────────────────────────
-
-  bookmarks
-    .command('categories')
-    .description('Show category distribution')
-    .action(safe(async () => {
-      if (!requireIndex()) return;
-      const counts = await getCategoryCounts();
-      if (Object.keys(counts).length === 0) {
-        console.log('  No categories found. Run: ft bookmarks classify');
-        return;
-      }
-      const total = Object.values(counts).reduce((a, b) => a + b, 0);
-      for (const [cat, count] of Object.entries(counts).sort((a, b) => b[1] - a[1])) {
-        const pct = ((count / total) * 100).toFixed(1);
-        console.log(`  ${cat.padEnd(14)} ${String(count).padStart(5)}  (${pct}%)`);
-      }
-    }));
-
-  // ── domains ─────────────────────────────────────────────────────────────
-
-  bookmarks
-    .command('domains')
-    .description('Show domain distribution')
-    .action(safe(async () => {
-      if (!requireIndex()) return;
-      const counts = await getDomainCounts();
-      if (Object.keys(counts).length === 0) {
-        console.log('  No domains found. Run: ft bookmarks classify-domains');
-        return;
-      }
-      const total = Object.values(counts).reduce((a, b) => a + b, 0);
-      for (const [dom, count] of Object.entries(counts).sort((a, b) => b[1] - a[1])) {
-        const pct = ((count / total) * 100).toFixed(1);
-        console.log(`  ${dom.padEnd(20)} ${String(count).padStart(5)}  (${pct}%)`);
-      }
-    }));
-
   // ── index ───────────────────────────────────────────────────────────────
 
   bookmarks
     .command('index')
     .description('Rebuild the SQLite search index from the JSONL cache')
-    .option('--force', 'Drop and rebuild from scratch (loses classifications)')
+    .option('--force', 'Drop and rebuild from scratch')
     .action(safe(async (options) => {
       if (!requireData()) return;
       process.stderr.write('Building search index...\n');
@@ -1302,6 +1164,97 @@ export function buildCli() {
     }));
 
   bookmarks
+    .command('trim')
+    .description('Keep only the latest bookmarks and unbookmark older posts on X in throttled batches')
+    .option('--keep <n>', 'Number of newest bookmarks to keep locally and remotely', (v: string) => Number(v), 200)
+    .option('--batch-size <n>', 'How many bookmarks to unbookmark per batch', (v: string) => Number(v), 25)
+    .option('--pause-seconds <n>', 'Seconds to pause between batches', (v: string) => Number(v), 45)
+    .option('--rate-limit-backoff-seconds <n>', 'Seconds to wait before retrying a 429 response', (v: string) => Number(v), 300)
+    .option('--max-rate-limit-retries <n>', 'How many times to retry the same bookmark after a 429', (v: string) => Number(v), 3)
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (options) => {
+      if (!requireData()) return;
+
+      let csrfToken: string | undefined;
+      let cookieHeader: string | undefined;
+      if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
+        csrfToken = String(options.cookies[0]);
+        const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+        const parts = [`ct0=${csrfToken}`];
+        if (authToken) parts.push(`auth_token=${authToken}`);
+        cookieHeader = parts.join('; ');
+      }
+
+      const keep = Math.max(0, Number(options.keep) || 0);
+      const batchSize = Math.max(1, Number(options.batchSize) || 25);
+      const pauseSeconds = Math.max(0, Number(options.pauseSeconds) || 0);
+      const rateLimitBackoffSeconds = Math.max(1, Number(options.rateLimitBackoffSeconds) || 300);
+      const maxRateLimitRetries = Math.max(0, Number(options.maxRateLimitRetries) || 0);
+
+      console.log(`\n  Trimming bookmarks archive`);
+      console.log(`  Keep newest: ${keep}`);
+      console.log(`  Batch size: ${batchSize}`);
+      console.log(`  Pause: ${pauseSeconds}s\n`);
+
+      const result = await trimBookmarks({
+        keep,
+        batchSize,
+        pauseSeconds,
+        rateLimitBackoffSeconds,
+        maxRateLimitRetries,
+        browser: options.browser ? String(options.browser) : undefined,
+        csrfToken,
+        cookieHeader,
+        chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+        chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+        firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+        onProgress: (progress) => {
+          if (progress.currentTweetId) {
+            if (progress.pausedSeconds) {
+              process.stderr.write(
+                `  Rate limited on ${progress.currentTweetId} · ` +
+                `${progress.completed}/${progress.totalToRemove} complete · ` +
+                `retrying in ${progress.pausedSeconds}s\n`,
+              );
+              return;
+            }
+            process.stderr.write(
+              `  Batch ${progress.batchNumber}/${progress.batchTotal} · ` +
+              `${progress.completed}/${progress.totalToRemove} complete · ` +
+              `unbookmarking ${progress.currentTweetId}\n`,
+            );
+            return;
+          }
+
+          if (progress.pausedSeconds) {
+            process.stderr.write(
+              `  Batch ${progress.batchNumber}/${progress.batchTotal} complete · ` +
+              `${progress.completed}/${progress.totalToRemove} done · ` +
+              `pausing ${progress.pausedSeconds}s\n`,
+            );
+          }
+        },
+      });
+
+      if (result.removed === 0) {
+        console.log(`  No trim needed. Bookmarks already at or below ${keep}.`);
+        console.log(`  Current bookmarks: ${result.totalAfter}\n`);
+        return;
+      }
+
+      console.log(`  ✓ Removed ${result.removed} old bookmarks on X`);
+      console.log(`  Remaining bookmarks: ${result.totalAfter}`);
+      if (result.keepBoundaryId) console.log(`  Oldest kept bookmark: ${result.keepBoundaryId}`);
+      if (result.cachePath) console.log(`  Cache: ${result.cachePath}`);
+      if (result.dbPath) console.log(`  Index: ${result.dbPath}`);
+      console.log();
+    }));
+
+  bookmarks
     .command('repair')
     .description('Repair bookmark enrichment gaps in existing local data')
     .option('--delay-ms <n>', 'Delay between repair requests in ms', (v: string) => Number(v), 300)
@@ -1372,6 +1325,51 @@ export function buildCli() {
         process.stderr.write('  Building likes search index...\n');
         const idx = await buildLikesIndex();
         process.stderr.write(`  ✓ ${idx.recordCount} likes indexed (${idx.newRecords} new)\n`);
+      }
+    }));
+
+  likes
+    .command('add')
+    .description('Like one post on X and reconcile the local likes archive')
+    .argument('<id>', 'Post id')
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (id: string, options) => {
+      let csrfToken: string | undefined;
+      let cookieHeader: string | undefined;
+      if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
+        csrfToken = String(options.cookies[0]);
+        const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+        const parts = [`ct0=${csrfToken}`];
+        if (authToken) parts.push(`auth_token=${authToken}`);
+        cookieHeader = parts.join('; ');
+      }
+
+      const result = await likeTweet(String(id), {
+        browser: options.browser ? String(options.browser) : undefined,
+        csrfToken,
+        cookieHeader,
+        chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+        chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+        firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+      });
+
+      const localRecord = await fetchLikeRecordViaSyndication(String(id));
+      const local = localRecord ? await upsertLikeInArchive(localRecord) : null;
+
+      console.log(`\n  ✓ Liked on X: ${result.tweetId}`);
+      console.log(`  Attempts: ${result.attempts}\n`);
+      if (local) {
+        console.log(`  Local archive: ${local.inserted ? 'cached new record' : 'updated cached record'}`);
+        console.log(`  Cached likes: ${local.totalRecords}`);
+        console.log(`  Cache: ${local.cachePath}`);
+        console.log(`  Index: ${local.dbPath}\n`);
+      } else {
+        console.log('  Local archive: like created remotely, but local metadata fetch was unavailable.');
+        console.log('  Run `ft likes sync` if you want to pull it into the local archive immediately.\n');
       }
     }));
 
@@ -1521,6 +1519,15 @@ export function buildCli() {
     }));
 
   likes
+    .command('repair')
+    .description('Repair likes enrichment gaps in existing local data')
+    .option('--delay-ms <n>', 'Delay between repair requests in ms', (v: string) => Number(v), 300)
+    .action(safe(async (options) => {
+      if (!requireLikesData()) return;
+      await runLikeRepairCommand(options);
+    }));
+
+  likes
     .command('search')
     .description('Full-text search across liked posts')
     .argument('<query>', 'Search query (supports FTS5 syntax: AND, OR, NOT, "exact phrase")')
@@ -1596,6 +1603,50 @@ export function buildCli() {
     }));
 
   likes
+    .command('export')
+    .description('Export liked posts as canonical archive JSON')
+    .option('--query <query>', 'Text query (FTS5 syntax)')
+    .option('--author <handle>', 'Filter by author handle')
+    .option('--after <date>', 'Liked after (YYYY-MM-DD)')
+    .option('--before <date>', 'Liked before (YYYY-MM-DD)')
+    .option('--limit <n>', 'Max results', (v: string) => Number(v))
+    .option('--out <path>', 'Write JSON to this file instead of stdout')
+    .action(safe(async (options) => {
+      if (!requireLikesIndex()) return;
+      const payload = await exportLikes({
+        query: options.query ? String(options.query) : undefined,
+        author: options.author ? String(options.author) : undefined,
+        after: options.after ? String(options.after) : undefined,
+        before: options.before ? String(options.before) : undefined,
+        limit: options.limit != null ? Number(options.limit) : undefined,
+      });
+      writeJsonExportOutput(payload, options.out ? String(options.out) : undefined);
+    }));
+
+  likes
+    .command('stats')
+    .description('Aggregate statistics from your likes')
+    .action(safe(async () => {
+      if (!requireLikesIndex()) return;
+      const stats = await getLikeStats();
+      console.log(`Likes: ${stats.totalLikes}`);
+      console.log(`Unique authors: ${stats.uniqueAuthors}`);
+      console.log(`Date range: ${stats.dateRange.earliest?.slice(0, 10) ?? '?'} to ${stats.dateRange.latest?.slice(0, 10) ?? '?'}`);
+      console.log(`\nTop authors:`);
+      for (const author of stats.topAuthors) console.log(`  @${author.handle}: ${author.count}`);
+      console.log(`\nLanguages:`);
+      for (const language of stats.languageBreakdown) console.log(`  ${language.language}: ${language.count}`);
+    }));
+
+  likes
+    .command('viz')
+    .description('Visual dashboard of your liking patterns')
+    .action(safe(async () => {
+      if (!requireLikesIndex()) return;
+      console.log(await renderLikeViz());
+    }));
+
+  likes
     .command('index')
     .description('Rebuild the SQLite search index from the likes JSONL cache')
     .option('--force', 'Drop and rebuild from scratch')
@@ -1604,6 +1655,20 @@ export function buildCli() {
       process.stderr.write('Building likes search index...\n');
       const result = await buildLikesIndex({ force: Boolean(options.force) });
       console.log(`Indexed ${result.recordCount} likes (${result.newRecords} new) → ${result.dbPath}`);
+    }));
+
+  likes
+    .command('fetch-media')
+    .description('Download media assets for likes (static images and mp4 variants)')
+    .option('--limit <n>', 'Max likes to process', (v: string) => Number(v), 100)
+    .option('--max-bytes <n>', 'Per-asset byte limit', (v: string) => Number(v), 50 * 1024 * 1024)
+    .action(safe(async (options) => {
+      if (!requireLikesData()) return;
+      const result = await fetchLikeMediaBatch({
+        limit: Number(options.limit) || 100,
+        maxBytes: Number(options.maxBytes) || 50 * 1024 * 1024,
+      });
+      console.log(JSON.stringify(result, null, 2));
     }));
 
   const resolveBrowserSessionOptions = (options: Record<string, unknown>) => {
@@ -1631,7 +1696,7 @@ export function buildCli() {
 
   const accounts = program
     .command('accounts')
-    .description('Review followed accounts and manage tracked public-account timelines');
+    .description('Manage tracked public-account timelines');
 
   accounts
     .command('sync')
@@ -1660,100 +1725,6 @@ export function buildCli() {
       if (result.latestTweetId) console.log(`  latest tweet: ${result.latestTweetId}`);
       console.log(`  ${friendlyStopReason(result.stopReason)}`);
       console.log(`  ✓ Data: ${dataDir()}\n`);
-    }));
-
-  accounts
-    .command('review')
-    .description('Review your current following list and surface conservative unfollow candidates')
-    .option('--max-pages <n>', 'Max following-list pages to fetch', (v: string) => Number(v), 1)
-    .option('--max-results <n>', 'Max accounts per following page', (v: string) => Number(v), 200)
-    .option('--max-stage2 <n>', 'Max accounts to deep-scan before scoring', (v: string) => Number(v), 25)
-    .option('--timeline-page-size <n>', 'How many recent posts to inspect per deep-scanned account', (v: string) => Number(v), 20)
-    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
-    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
-    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
-    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
-    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
-    .action(safe(async (options) => {
-      ensureDataDir();
-      const session = resolveBrowserSessionOptions(options);
-      const sync = await syncFollowingSnapshot({
-        maxPages: Number(options.maxPages) || 1,
-        maxResults: Number(options.maxResults) || 200,
-        ...session,
-      });
-      const review = await runAccountReview({
-        maxStage2Accounts: Number(options.maxStage2) || 25,
-        timelinePageSize: Number(options.timelinePageSize) || 20,
-        ...session,
-      });
-      await buildFollowingReviewIndex({ force: true });
-
-      console.log(`\n  Reviewed ${review.totalAccounts} followed accounts`);
-      if (!sync.isComplete) {
-        console.log(`  Note: following snapshot is partial (${review.totalAccounts} fetched; more pages remain)`);
-      }
-      console.log(`  Deep scanned: ${review.stage2Count}`);
-      console.log(`  Candidates: ${review.candidateCount}\n`);
-      console.log(formatAccountReviewResults(review.results));
-      console.log();
-    }));
-
-  accounts
-    .command('label')
-    .description('Store a manual value label for a followed account in the review cache')
-    .argument('<handle>', 'Followed account handle, with or without @')
-    .argument('<value>', 'Label: valuable, not-valuable, or neutral')
-    .action(safe(async (handle: string, value: string) => {
-      const account = await requireFollowedAccount(handle);
-      if (!account) return;
-      const normalized = String(value).trim().toLowerCase();
-      if (!['valuable', 'not-valuable', 'neutral'].includes(normalized)) {
-        throw new Error('Invalid label. Use: valuable, not-valuable, or neutral.');
-      }
-      const label = await setFollowingLabel({
-        targetUserId: account.userId,
-        handle: account.handle,
-        value: normalized as 'valuable' | 'not-valuable' | 'neutral',
-      });
-      await buildFollowingReviewIndex({ force: true });
-      console.log(`\n  Saved label for @${account.handle}: ${label.value}\n`);
-    }));
-
-  accounts
-    .command('unfollow')
-    .description('Unfollow one reviewed account on X and reconcile the local review cache')
-    .argument('<handle>', 'Followed account handle, with or without @')
-    .option('--yes', 'Skip confirmation prompt', false)
-    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
-    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
-    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
-    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
-    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
-    .action(safe(async (handle: string, options) => {
-      const account = await requireFollowedAccount(handle);
-      if (!account) return;
-      const reviewItem = await getFollowingReviewItemByHandle(account.handle);
-      if (!options.yes) {
-        console.log(`\n  About to unfollow @${account.handle}${account.name ? ` (${account.name})` : ''}`);
-        if (reviewItem?.primaryReason) {
-          console.log(`  Latest review reason: ${reviewItem.primaryReason}`);
-        }
-        const answer = await promptText('  Continue? (y/N) ', { output: process.stdout });
-        if (answer.kind === 'interrupt') {
-          throw new PromptCancelledError('Cancelled. Unfollow aborted.', 130);
-        }
-        if (answer.kind !== 'answer' || answer.value.toLowerCase() !== 'y') {
-          console.log('  Aborted.');
-          return;
-        }
-      }
-
-      await unfollowAccount(account.userId, resolveBrowserSessionOptions(options));
-      const reconciled = await reconcileUnfollowedAccount(account.userId);
-      console.log(`\n  Unfollowed on X: @${account.handle}`);
-      console.log(`  Local review cache: ${reconciled.removedFromSnapshot ? 'updated' : 'no matching snapshot row'}`);
-      console.log(`  Remaining followed accounts in cache: ${reconciled.totalFollowing}\n`);
     }));
 
   accounts
@@ -1905,12 +1876,76 @@ export function buildCli() {
     }));
 
   feed
+    .command('search')
+    .description('Full-text search across cached Home timeline tweets')
+    .argument('<query>', 'Search query (supports FTS5 syntax: AND, OR, NOT, "exact phrase")')
+    .option('--limit <n>', 'Max results', (v: string) => Number(v), 20)
+    .option('--json', 'JSON output')
+    .action(safe(async (query: string, options) => {
+      if (!requireFeedIndex()) return;
+      const results = await searchFeed(query, Number(options.limit) || 20);
+      if (options.json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+      console.log(formatFeedSearchResults(results));
+    }));
+
+  feed
     .command('status')
     .description('Show feed sync status and data location')
     .action(safe(async () => {
       if (!requireFeedData()) return;
       const view = await getFeedStatusView();
       console.log(formatFeedStatus(view));
+    }));
+
+  feed
+    .command('trim')
+    .description('Keep only the latest cached feed items and remove older local entries')
+    .option('--keep <n>', 'Number of newest feed items to keep locally', (v: string) => Number(v), 1000)
+    .option('--batch-size <n>', 'How many feed items to remove per batch', (v: string) => Number(v), 500)
+    .option('--pause-seconds <n>', 'Seconds to pause between batches', (v: string) => Number(v), 0)
+    .action(safe(async (options) => {
+      if (!requireFeedData()) return;
+
+      const keep = Math.max(0, Number(options.keep) || 0);
+      const batchSize = Math.max(1, Number(options.batchSize) || 500);
+      const pauseSeconds = Math.max(0, Number(options.pauseSeconds) || 0);
+
+      console.log(`\n  Trimming feed archive`);
+      console.log(`  Keep newest: ${keep}`);
+      console.log(`  Batch size: ${batchSize}`);
+      console.log(`  Pause: ${pauseSeconds}s\n`);
+
+      const result = await trimFeed({
+        keep,
+        batchSize,
+        pauseSeconds,
+        onProgress: (progress) => {
+          process.stderr.write(
+            `  Batch ${progress.batchNumber}/${progress.batchTotal} · ` +
+            `${progress.completed}/${progress.totalToRemove} removed\n`,
+          );
+          if (progress.pausedSeconds) {
+            process.stderr.write(`  Pausing ${progress.pausedSeconds}s\n`);
+          }
+        },
+      });
+
+      if (result.removed === 0) {
+        console.log(`  No trim needed. Feed already at or below ${keep}.`);
+        console.log(`  Current feed items: ${result.totalAfter}\n`);
+        return;
+      }
+
+      console.log(`  ✓ Removed ${result.removed} old feed items locally`);
+      if (result.contextRemoved > 0) console.log(`  ✓ Removed ${result.contextRemoved} feed context bundles`);
+      console.log(`  Remaining feed items: ${result.totalAfter}`);
+      if (result.keepBoundaryId) console.log(`  Oldest kept feed item: ${result.keepBoundaryId}`);
+      if (result.cachePath) console.log(`  Cache: ${result.cachePath}`);
+      if (result.dbPath) console.log(`  Index: ${result.dbPath}`);
+      console.log();
     }));
 
   feed
@@ -1968,6 +2003,38 @@ export function buildCli() {
       console.log(formatFeedConversationSummary(context).join('\n'));
     }));
 
+  feed
+    .command('export')
+    .description('Export feed items as canonical archive JSON')
+    .option('--query <query>', 'Text query (FTS5 syntax)')
+    .option('--author <handle>', 'Filter by author handle')
+    .option('--after <date>', 'Posted after (YYYY-MM-DD)')
+    .option('--before <date>', 'Posted before (YYYY-MM-DD)')
+    .option('--limit <n>', 'Max results', (v: string) => Number(v))
+    .option('--out <path>', 'Write JSON to this file instead of stdout')
+    .action(safe(async (options) => {
+      if (!requireFeedIndex()) return;
+      const payload = await exportFeed({
+        query: options.query ? String(options.query) : undefined,
+        author: options.author ? String(options.author) : undefined,
+        after: options.after ? String(options.after) : undefined,
+        before: options.before ? String(options.before) : undefined,
+        limit: options.limit != null ? Number(options.limit) : undefined,
+      });
+      writeJsonExportOutput(payload, options.out ? String(options.out) : undefined);
+    }));
+
+  feed
+    .command('index')
+    .description('Rebuild the SQLite search index from the feed JSONL cache')
+    .option('--force', 'Drop and rebuild from scratch')
+    .action(safe(async (options) => {
+      if (!requireFeedData()) return;
+      process.stderr.write('Building feed search index...\n');
+      const result = await buildFeedIndex({ force: Boolean(options.force) });
+      console.log(`Indexed ${result.recordCount} feed items (${result.newRecords} new) → ${result.dbPath}`);
+    }));
+
   const feedContext = feed
     .command('context')
     .description('Collect and inspect conversation context for cached feed items');
@@ -2003,11 +2070,11 @@ export function buildCli() {
 
   const feedDaemon = feed
     .command('daemon')
-    .description('Run recurring feed collection and local semantic indexing');
+    .description('Run recurring feed collection');
 
   feedDaemon
     .command('start')
-    .description('Start the recurring feed daemon')
+    .description('Start the recurring feed collection daemon')
     .requiredOption('--every <interval>', 'Repeat with an interval like 30s, 5m, or 2h')
     .option('--max-pages <n>', 'How many feed pages to sync on each tick', (v: string) => Number(v), 1)
     .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
@@ -2019,7 +2086,7 @@ export function buildCli() {
       ensureDataDir();
       const intervalMs = parseIntervalMs(String(options.every));
       console.log(`Feed daemon: every ${String(options.every)}`);
-      console.log('  Each tick: refresh feed -> refresh semantic index');
+      console.log('  Each tick: refresh feed');
       await startFeedDaemon({
         everyMs: intervalMs,
         maxPages: options.maxPages != null ? Number(options.maxPages) : 1,
@@ -2055,56 +2122,12 @@ export function buildCli() {
       if (state.pid) console.log('\n  Use your shell or tail on the daemon log for live follow-up.');
     }));
 
-  const feedSemantic = feed
-    .command('semantic')
-    .description('Inspect and rebuild the local semantic retrieval index');
-
-  feedSemantic
-    .command('status')
-    .description('Show semantic provider config and local vector coverage')
-    .action(safe(async () => {
-      console.log(formatSemanticStatus(await getSemanticStatusView()));
-    }));
-
-  feedSemantic
-    .command('rebuild')
-    .description('Rebuild semantic vectors for feed, likes, and bookmarks')
-    .action(safe(async () => {
-      ensureDataDir();
-      const meta = await rebuildSemanticIndex();
-      console.log(formatSemanticStatus(await getSemanticStatusView()));
-      console.log(`\nSemantic rebuild complete at ${meta.updatedAt}.`);
-    }));
-
   // ── path ────────────────────────────────────────────────────────────────
 
   program
     .command('path')
     .description('Print the data directory path')
     .action(() => { console.log(dataDir()); });
-
-  // ── sample ──────────────────────────────────────────────────────────────
-
-  bookmarks
-    .command('sample')
-    .description('Sample bookmarks by category')
-    .argument('<category>', 'Category: tool, security, technique, launch, research, opinion, commerce')
-    .option('--limit <n>', 'Max results', (v: string) => Number(v), 10)
-    .action(safe(async (category: string, options) => {
-      if (!requireIndex()) return;
-      const results = await sampleByCategory(category, Number(options.limit) || 10);
-      if (results.length === 0) {
-        console.log(`  No bookmarks found with category "${category}". Run: ft bookmarks classify`);
-        return;
-      }
-      for (const r of results) {
-        const text = r.text.length > 120 ? r.text.slice(0, 120) + '...' : r.text;
-        console.log(`[@${r.authorHandle ?? '?'}] ${text}`);
-        console.log(`  ${r.url}  [${r.categories}]`);
-        if (r.githubUrls) console.log(`  github: ${r.githubUrls}`);
-        console.log();
-      }
-    }));
 
   // ── fetch-media ─────────────────────────────────────────────────────────
 
@@ -2120,131 +2143,6 @@ export function buildCli() {
         maxBytes: Number(options.maxBytes) || 50 * 1024 * 1024,
       });
       console.log(JSON.stringify(result, null, 2));
-    }));
-
-  // ── ft md ── Export bookmarks as markdown files ────────────────────────
-
-  program
-    .command('md')
-    .description('Export bookmarks as individual markdown files')
-    .option('--force', 'Re-export all bookmarks (overwrite existing files)')
-    .action(safe(async (options) => {
-      if (!requireIndex()) return;
-      let lastLine = '';
-      const spinner = createSpinner(() => lastLine);
-      const result = await exportBookmarks({
-        force: options.force,
-        onProgress: (s) => {
-          lastLine = s;
-          spinner.update();
-        },
-      });
-      spinner.stop();
-      const skippedNote = result.skipped > 0 ? ` (${result.skipped} already existed)` : '';
-      console.log(`Exported ${result.exported}/${result.total} bookmarks${skippedNote}`);
-      console.log(`  ${result.elapsed}s elapsed`);
-      console.log(`\n  Open in your markdown viewer:\n  ${mdDir()}`);
-    }));
-
-  // ── ft wiki ── Compile Karpathy-style knowledge base ────────────────────
-
-  program
-    .command('wiki')
-    .description('Compile Karpathy-style markdown wiki from bookmarks')
-    .option('--full', 'Recompile all pages (ignore incremental cache)')
-    .action(safe(async (options) => {
-      if (!requireIndex()) return;
-      const start = Date.now();
-      let lastLine = '';
-      const spinner = createSpinner(() => lastLine);
-      const result = await compileMd({
-        full: options.full,
-        onProgress: (s) => {
-          lastLine = s;
-          spinner.update();
-        },
-      });
-      spinner.stop();
-      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-      const failed = result.pagesFailed > 0 ? ` failed=${result.pagesFailed}` : '';
-      console.log(`Done (${elapsed}s) — engine=${result.engine} created=${result.pagesCreated} updated=${result.pagesUpdated} skipped=${result.pagesSkipped}${failed} total=${result.totalPages}`);
-      if (result.pagesFailed > 0) {
-        console.log(`\n  ${result.pagesFailed} page(s) failed — re-run ft wiki to retry them.`);
-      }
-      console.log(`\n  Open in your markdown viewer:\n  ${mdDir()}`);
-    }));
-
-  // ── ft ask ── Q&A against the knowledge base ──────────────────────────
-
-  program
-    .command('ask')
-    .description('Ask a question against the markdown knowledge base')
-    .argument('<question>', 'The question to answer')
-    .option('--save', 'Save the answer as a concept page')
-    .option('--json', 'Output JSON instead of text')
-    .action(safe(async (question, options) => {
-      if (!requireIndex()) return;
-      let lastLine = '';
-      const spinner = createSpinner(() => lastLine);
-      const result = await askMd(question, {
-        save: options.save,
-        onProgress: (s) => {
-          lastLine = s;
-          spinner.update();
-        },
-      });
-      spinner.stop();
-
-      if (options.json) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(`\n${result.answer}`);
-        if (result.pagesRead.length > 0) {
-          console.log(`\nSources: ${result.pagesRead.join(', ')}`);
-        }
-        if (result.wikiUpdates.length > 0) {
-          console.log('\nSuggested updates:');
-          for (const u of result.wikiUpdates) console.log(`  - ${u}`);
-        }
-        if (result.savedAs) {
-          console.log(`\nSaved to: ${result.savedAs}`);
-        }
-      }
-    }));
-
-  // ── ft lint ── Health-check the markdown wiki ─────────────────────────
-
-  program
-    .command('lint')
-    .description('Health-check the markdown knowledge base')
-    .option('--fix', 'Auto-fix fixable issues with targeted recompile')
-    .option('--json', 'Output JSON instead of text')
-    .action(safe(async (options) => {
-      if (!requireIndex()) return;
-      const result = await lintMd();
-
-      if (options.fix && result.issues.some((i) => i.fixable)) {
-        console.log('Fixing issues...');
-        const fixed = await fixLintIssues(result.issues);
-        console.log(`Fixed ${fixed} pages.`);
-        return;
-      }
-
-      if (options.json) {
-        console.log(JSON.stringify(result, null, 2));
-        return;
-      }
-
-      console.log(`Pages: ${result.stats.totalPages}  Links: ${result.stats.totalLinks}  Health: ${result.stats.healthScore}%`);
-      if (result.issues.length === 0) {
-        console.log('No issues found.');
-      } else {
-        for (const issue of result.issues) {
-          const page = issue.page ? ` ${issue.page}` : '';
-          const fix = issue.fixable ? ' (fixable)' : '';
-          console.log(`  [${issue.type}]${page}: ${issue.detail}${fix}`);
-        }
-      }
     }));
 
   // ── skill ──────────────────────────────────────────────────────────────

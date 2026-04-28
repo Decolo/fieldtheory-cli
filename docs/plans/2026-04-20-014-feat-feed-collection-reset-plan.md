@@ -63,7 +63,7 @@ This is standard-to-deep refactor work because it changes exported CLI contracts
 
 ## Key Technical Decisions
 
-- Keep `feed daemon` as `fetch -> semantic index`, not `fetch` only. Rationale: semantic indexing is still deterministic local data maintenance and keeps feed retrieval surfaces current without reintroducing agent behavior.
+- Keep `feed daemon` as feed collection only. Rationale: semantic indexing has been removed from the CLI surface and daemon runtime to keep feed maintenance deterministic and dependency-light.
 - Remove `feed agent`, `feed consumer`, and `feed preferences` as feed-owned concepts rather than leaving dormant compatibility wrappers. Rationale: dormant shells would preserve the wrong product model and force future maintenance against deprecated artifacts.
 - Narrow daemon observability to collection/indexing outcomes. Rationale: feed runtime status should answer "did collection succeed?" instead of exposing stale action counters that no longer map to product behavior.
 - Leave explicit `like` / `bookmark` GraphQL primitives intact in `src/graphql-actions.ts`. Rationale: the requirements remove autonomous actioning from feed collection, not all explicit remote mutation capability in the repo.
@@ -73,7 +73,7 @@ This is standard-to-deep refactor work because it changes exported CLI contracts
 
 ### Resolved During Planning
 
-- Should `feed daemon` still maintain semantic retrieval state? Yes; semantic indexing remains collection-adjacent deterministic maintenance.
+- Should `feed daemon` still maintain semantic retrieval state? No; the semantic surface has been removed, so the daemon should only refresh feed data.
 - Should `feed agent` be kept as a deprecated shell? No; remove it entirely.
 - Should `feed prefs` be reinterpreted as collection filters? No; remove it with the action runtime.
 
@@ -91,15 +91,13 @@ This is standard-to-deep refactor work because it changes exported CLI contracts
 current
   feed daemon tick
     -> fetch feed
-    -> rebuild semantic data for new items
     -> score / consume / like / bookmark
     -> persist action metrics
 
 target
   feed daemon tick
     -> fetch feed
-    -> rebuild semantic data for new items
-    -> persist collection/indexing metrics
+    -> persist collection metrics
     -> stop
 
 removed surfaces
@@ -115,14 +113,14 @@ removed surfaces
 ### Primary flows
 
 1. `ft feed sync` continues fetching Home timeline items and rebuilding the feed index exactly as today.
-2. `ft feed daemon start --every ...` runs recurring collection and semantic indexing, then records a collection-oriented tick summary.
+2. `ft feed daemon start --every ...` runs recurring collection, then records a collection-oriented tick summary.
 3. `ft feed status`, `ft feed list`, `ft feed show`, and `search-all --scope feed` continue reading the local feed archive without caring that action runtime state is gone.
 
 ### Important edge cases
 
 - Existing `feed-daemon-state.json` may still contain action-era fields; the new status formatter must not surface them as if they still mattered.
 - Users with stale `feed-agent-*` files should not see CLI errors simply because those files remain on disk after upgrade.
-- Semantic indexing failures must still be reported clearly in daemon status/log output even after action-specific error kinds disappear.
+- Feed collection failures must still be reported clearly in daemon status/log output even after action-specific error kinds disappear.
 - Help output and test fixtures must stop advertising removed subcommands immediately so users do not infer hidden compatibility.
 
 ## Implementation Units

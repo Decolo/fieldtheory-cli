@@ -12,8 +12,6 @@ export interface ProjectionSearchOptions {
 }
 
 export interface BookmarkProjectionFilters extends ProjectionSearchOptions {
-  category?: string;
-  domain?: string;
   sort?: 'asc' | 'desc';
   offset?: number;
 }
@@ -23,7 +21,8 @@ export interface LikeProjectionFilters extends ProjectionSearchOptions {
   offset?: number;
 }
 
-export interface FeedProjectionFilters {
+export interface FeedProjectionFilters extends ProjectionSearchOptions {
+  sort?: 'asc' | 'desc';
   limit?: number;
   offset?: number;
 }
@@ -66,10 +65,6 @@ export interface BookmarkProjectionItem {
   authorProfileImageUrl?: string;
   postedAt?: string | null;
   bookmarkedAt?: string | null;
-  categories: string[];
-  primaryCategory?: string | null;
-  domains: string[];
-  primaryDomain?: string | null;
   githubUrls: string[];
   links: string[];
   mediaCount: number;
@@ -140,11 +135,7 @@ export interface ProjectionSearchResult {
   score: number;
 }
 
-interface BookmarkLegacyMetadata {
-  categories: string[];
-  primaryCategory?: string | null;
-  domains: string[];
-  primaryDomain?: string | null;
+interface BookmarkDbMetadata {
   githubUrls: string[];
 }
 
@@ -156,14 +147,6 @@ function parseJsonArray(value: unknown): string[] {
   } catch {
     return [];
   }
-}
-
-function parseCsv(value: unknown): string[] {
-  if (typeof value !== 'string' || !value.trim()) return [];
-  return value
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
 }
 
 function parseMetadata(value: unknown): Record<string, unknown> | undefined {
@@ -282,7 +265,7 @@ async function queryArchiveRows(
   }
   if (options.after) {
     if (source === 'feed') {
-      conditions.push(`src.synced_at >= ?`);
+      conditions.push(`COALESCE(ai.posted_at, src.synced_at) >= ?`);
     } else if (source === 'bookmark') {
       conditions.push(`${bookmarkProjectionDateFilterExpression()} >= ?`);
     } else {
@@ -292,7 +275,7 @@ async function queryArchiveRows(
   }
   if (options.before) {
     if (source === 'feed') {
-      conditions.push(`src.synced_at <= ?`);
+      conditions.push(`COALESCE(ai.posted_at, src.synced_at) <= ?`);
     } else if (source === 'bookmark') {
       conditions.push(`${bookmarkProjectionDateFilterExpression()} <= ?`);
     } else {
@@ -455,7 +438,7 @@ async function searchArchiveRows(
   }
 }
 
-async function loadBookmarkMetadata(tweetIds: string[]): Promise<Map<string, BookmarkLegacyMetadata>> {
+async function loadBookmarkMetadata(tweetIds: string[]): Promise<Map<string, BookmarkDbMetadata>> {
   if (tweetIds.length === 0) return new Map();
 
   const db = await openDb(twitterBookmarksIndexPath());
@@ -463,7 +446,7 @@ async function loadBookmarkMetadata(tweetIds: string[]): Promise<Map<string, Boo
     const placeholders = tweetIds.map(() => '?').join(', ');
     const rows = db.exec(
       `
-        SELECT tweet_id, categories, primary_category, domains, primary_domain, github_urls
+        SELECT tweet_id, github_urls
         FROM bookmarks
         WHERE tweet_id IN (${placeholders})
       `,
@@ -474,12 +457,8 @@ async function loadBookmarkMetadata(tweetIds: string[]): Promise<Map<string, Boo
       (rows[0]?.values ?? []).map((row) => [
         String(row[0]),
         {
-          categories: parseCsv(row[1]),
-          primaryCategory: (row[2] as string) ?? null,
-          domains: parseCsv(row[3]),
-          primaryDomain: (row[4] as string) ?? null,
-          githubUrls: parseJsonArray(row[5]),
-        } satisfies BookmarkLegacyMetadata,
+          githubUrls: parseJsonArray(row[1]),
+        } satisfies BookmarkDbMetadata,
       ]),
     );
   } catch {
@@ -489,20 +468,7 @@ async function loadBookmarkMetadata(tweetIds: string[]): Promise<Map<string, Boo
   }
 }
 
-function bookmarkMatchesMetadata(
-  metadata: BookmarkLegacyMetadata | undefined,
-  filters: Pick<BookmarkProjectionFilters, 'category' | 'domain'>,
-): boolean {
-  if (filters.category && !metadata?.categories.some((category) => category.includes(filters.category!))) {
-    return false;
-  }
-  if (filters.domain && !metadata?.domains.some((domain) => domain.includes(filters.domain!))) {
-    return false;
-  }
-  return true;
-}
-
-function mapBookmarkRow(row: SourceProjectionRow, metadata: BookmarkLegacyMetadata | undefined): BookmarkProjectionItem {
+function mapBookmarkRow(row: SourceProjectionRow, metadata: BookmarkDbMetadata | undefined): BookmarkProjectionItem {
   return {
     id: row.sourceRecordId ?? row.canonicalId,
     tweetId: row.tweetId,
@@ -513,10 +479,6 @@ function mapBookmarkRow(row: SourceProjectionRow, metadata: BookmarkLegacyMetada
     authorProfileImageUrl: row.authorProfileImageUrl,
     postedAt: row.postedAt ?? null,
     bookmarkedAt: row.sourceTimestamp ?? null,
-    categories: metadata?.categories ?? [],
-    primaryCategory: metadata?.primaryCategory ?? null,
-    domains: metadata?.domains ?? [],
-    primaryDomain: metadata?.primaryDomain ?? null,
     githubUrls: metadata?.githubUrls ?? [],
     links: row.links,
     mediaCount: row.mediaCount,
@@ -555,10 +517,9 @@ export async function listBookmarkProjections(filters: BookmarkProjectionFilters
     sort: filters.sort,
   });
   const metadata = await loadBookmarkMetadata(rows.map((row) => row.tweetId));
-  const filtered = rows.filter((row) => bookmarkMatchesMetadata(metadata.get(row.tweetId), filters));
   const offset = filters.offset ?? 0;
-  const limit = filters.limit ?? 30;
-  return filtered.slice(offset, offset + limit).map((row) => mapBookmarkRow(row, metadata.get(row.tweetId)));
+  const limit = filters.limit ?? rows.length;
+  return rows.slice(offset, offset + limit).map((row) => mapBookmarkRow(row, metadata.get(row.tweetId)));
 }
 
 export async function countBookmarkProjections(filters: BookmarkProjectionFilters = {}): Promise<number> {
@@ -569,9 +530,7 @@ export async function countBookmarkProjections(filters: BookmarkProjectionFilter
     before: filters.before,
     sort: filters.sort,
   });
-  if (!filters.category && !filters.domain) return rows.length;
-  const metadata = await loadBookmarkMetadata(rows.map((row) => row.tweetId));
-  return rows.filter((row) => bookmarkMatchesMetadata(metadata.get(row.tweetId), filters)).length;
+  return rows.length;
 }
 
 export async function getBookmarkProjectionById(id: string): Promise<BookmarkProjectionItem | null> {
@@ -605,8 +564,8 @@ export async function listLikeProjections(filters: LikeProjectionFilters = {}): 
     after: filters.after,
     before: filters.before,
     sort: filters.sort,
-    limit: filters.limit ?? 30,
-    offset: filters.offset ?? 0,
+    limit: filters.limit,
+    offset: filters.offset,
   });
   return rows.map((row) => ({
     id: row.sourceRecordId ?? row.canonicalId,
@@ -685,8 +644,13 @@ export async function searchFeedProjections(query: string, limit = 20): Promise<
 
 export async function listFeedProjections(filters: FeedProjectionFilters = {}): Promise<FeedProjectionItem[]> {
   const rows = await queryArchiveRows('feed', {
-    limit: filters.limit ?? 30,
-    offset: filters.offset ?? 0,
+    query: filters.query,
+    author: filters.author,
+    after: filters.after,
+    before: filters.before,
+    sort: filters.sort,
+    limit: filters.limit,
+    offset: filters.offset,
   });
   return rows.map((row) => ({
     id: row.sourceRecordId ?? row.canonicalId,

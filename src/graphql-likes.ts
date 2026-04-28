@@ -5,6 +5,7 @@ import { ensureDataDir, twitterLikesBackfillStatePath, twitterLikesCachePath, tw
 import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
 import { extractFirefoxXCookies } from './firefox-cookies.js';
+import { fetchTweetViaSyndication, type GapFillFailure, type GapFillProgress } from './graphql-bookmarks.js';
 import { fetchXResource } from './x-graphql.js';
 import type { ArchiveItem, LikeRecord, LikesBackfillState, LikesCacheMeta } from './types.js';
 
@@ -17,6 +18,7 @@ const LIKES_QUERY_ID = 'KPuet6dGbC8LB2sOLx7tZQ';
 const LIKES_OPERATION = 'Likes';
 const VIEWER_QUERY_ID = '_8ClT24oZ8tpylf_OSuNdg';
 const VIEWER_OPERATION = 'Viewer';
+const TRUNCATION_THRESHOLD = 275;
 
 const LIKES_GRAPHQL_FEATURES = {
   rweb_video_screen_enabled: true,
@@ -328,6 +330,33 @@ export function convertLikedTweetToRecord(tweet: FavoriteTweet, now: string): Li
   };
 }
 
+export async function fetchLikeRecordViaSyndication(
+  tweetId: string,
+  likedAt = new Date().toISOString(),
+): Promise<LikeRecord | null> {
+  const result = await fetchTweetViaSyndication(tweetId);
+  const snapshot = result.snapshot;
+  if (!snapshot) return null;
+
+  return {
+    id: snapshot.id,
+    tweetId: snapshot.id,
+    url: snapshot.url,
+    text: snapshot.text,
+    authorHandle: snapshot.authorHandle,
+    authorName: snapshot.authorName,
+    authorProfileImageUrl: snapshot.authorProfileImageUrl,
+    postedAt: snapshot.postedAt ?? null,
+    likedAt,
+    syncedAt: likedAt,
+    media: snapshot.media ?? [],
+    mediaObjects: snapshot.mediaObjects ?? [],
+    links: [],
+    tags: [],
+    ingestedVia: 'browser',
+  };
+}
+
 export function emitLikeArchiveItem(record: LikeRecord): ArchiveItem {
   return withLikeSourceRecordMetadata(archiveItemFromLikeRecord(record), record.id);
 }
@@ -399,6 +428,123 @@ export function mergeLikes(
   const merged = Array.from(byId.values());
   merged.sort((a, b) => compareLikeChronology(b, a));
   return { merged, added };
+}
+
+export interface LikesGapFillResult {
+  quotedTweetsFilled: number;
+  textExpanded: number;
+  likedAtMissing: number;
+  failed: number;
+  failures: GapFillFailure[];
+  total: number;
+}
+
+export async function syncLikeGaps(options?: {
+  onProgress?: (progress: GapFillProgress) => void;
+  delayMs?: number;
+}): Promise<LikesGapFillResult> {
+  const delayMs = options?.delayMs ?? 300;
+  const cachePath = twitterLikesCachePath();
+  const records = await readJsonLines<LikeRecord>(cachePath);
+
+  const needsQuotedTweet = records.filter((record) => record.quotedStatusId && !record.quotedTweet);
+  const quotedIds = new Set(needsQuotedTweet.map((record) => record.quotedStatusId!));
+
+  const maybeTruncated = records.filter((record) => (record.text?.length ?? 0) >= TRUNCATION_THRESHOLD);
+  const truncatedIds = new Set(maybeTruncated.map((record) => record.tweetId));
+
+  const recordsByQuotedId = new Map<string, LikeRecord[]>();
+  for (const record of needsQuotedTweet) {
+    const list = recordsByQuotedId.get(record.quotedStatusId!) ?? [];
+    list.push(record);
+    recordsByQuotedId.set(record.quotedStatusId!, list);
+  }
+
+  const recordsByTweetId = new Map<string, LikeRecord[]>();
+  for (const record of maybeTruncated) {
+    const list = recordsByTweetId.get(record.tweetId) ?? [];
+    list.push(record);
+    recordsByTweetId.set(record.tweetId, list);
+  }
+
+  const allFetchIds = [...new Set([...quotedIds, ...truncatedIds])];
+  const total = allFetchIds.length;
+
+  let quotedFetched = 0;
+  let textExpanded = 0;
+  let failed = 0;
+  const failures: GapFillFailure[] = [];
+
+  for (let i = 0; i < allFetchIds.length; i++) {
+    const tweetId = allFetchIds[i];
+    try {
+      const result = await fetchTweetViaSyndication(tweetId);
+      const snapshot = result.snapshot;
+      if (!snapshot) {
+        failed += 1;
+        const reasons: Record<string, string> = {
+          empty: 'tweet exists but has no text content',
+          not_found: 'deleted or does not exist',
+          forbidden: 'private or suspended account',
+          rate_limited: 'rate limited after 4 retries',
+          server_error: 'X server error after 4 retries',
+        };
+        failures.push({
+          tweetId,
+          reason: reasons[result.status] ?? result.status,
+          url: `https://x.com/_/status/${tweetId}`,
+        });
+      } else {
+        for (const record of recordsByQuotedId.get(tweetId) ?? []) {
+          if (!record.quotedTweet) {
+            record.quotedTweet = snapshot;
+            quotedFetched += 1;
+          }
+        }
+        for (const record of recordsByTweetId.get(tweetId) ?? []) {
+          if (snapshot.text.length > (record.text?.length ?? 0)) {
+            record.text = snapshot.text;
+            textExpanded += 1;
+          }
+        }
+      }
+    } catch (error) {
+      failed += 1;
+      failures.push({
+        tweetId,
+        reason: (error as Error).message ?? 'unknown error',
+        url: `https://x.com/_/status/${tweetId}`,
+      });
+    }
+
+    options?.onProgress?.({
+      done: i + 1,
+      total,
+      quotedFetched,
+      textExpanded,
+      failed,
+    });
+
+    if ((i + 1) % 100 === 0) {
+      await writeJsonLines(cachePath, records);
+    }
+
+    if (i < allFetchIds.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  await writeJsonLines(cachePath, records);
+  await rebuildArchiveStoreFromCaches({ forceIndex: true });
+
+  return {
+    quotedTweetsFilled: quotedFetched,
+    textExpanded,
+    likedAtMissing: records.filter((record) => !record.likedAt).length,
+    failed,
+    failures,
+    total,
+  };
 }
 
 function updateState(

@@ -1,5 +1,6 @@
 import type { Database } from 'sql.js';
 import { openDb, saveDb } from './db.js';
+import { parseTimestampMs, toIsoDate } from './date-utils.js';
 import { readJsonLines } from './fs.js';
 import { twitterLikesCachePath, twitterLikesIndexPath } from './paths.js';
 import type { LikeRecord } from './types.js';
@@ -71,6 +72,31 @@ function parseJsonArray(value: unknown): string[] {
   } catch {
     return [];
   }
+}
+
+function chronologicalDateRange(values: unknown[]): { earliest: string | null; latest: string | null } {
+  let earliestMs = Number.POSITIVE_INFINITY;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  let earliest: string | null = null;
+  let latest: string | null = null;
+
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const ms = parseTimestampMs(value);
+    if (ms == null) continue;
+    const isoDate = toIsoDate(value);
+    if (!isoDate) continue;
+    if (ms < earliestMs) {
+      earliestMs = ms;
+      earliest = isoDate;
+    }
+    if (ms > latestMs) {
+      latestMs = ms;
+      latest = isoDate;
+    }
+  }
+
+  return { earliest, latest };
 }
 
 function mapTimelineRow(row: unknown[]): LikeTimelineItem {
@@ -446,6 +472,56 @@ export async function getLikeById(id: string): Promise<LikeTimelineItem | null> 
   } catch (error) {
     if (!isMissingLikesIndexError(error)) throw error;
     return getLikeProjectionById(id);
+  } finally {
+    db.close();
+  }
+}
+
+export async function getLikeStats(): Promise<{
+  totalLikes: number;
+  uniqueAuthors: number;
+  dateRange: { earliest: string | null; latest: string | null };
+  topAuthors: { handle: string; count: number }[];
+  languageBreakdown: { language: string; count: number }[];
+}> {
+  const dbPath = twitterLikesIndexPath();
+  const db = await openDb(dbPath);
+
+  try {
+    const total = db.exec('SELECT COUNT(*) FROM likes')[0]?.values[0]?.[0] as number;
+    const authors = db.exec('SELECT COUNT(DISTINCT author_handle) FROM likes')[0]?.values[0]?.[0] as number;
+    const likedAtRows = db.exec('SELECT COALESCE(liked_at, posted_at) FROM likes WHERE liked_at IS NOT NULL OR posted_at IS NOT NULL');
+    const range = chronologicalDateRange(
+      (likedAtRows[0]?.values ?? []).map((row) => row[0]),
+    );
+
+    const topAuthorsRows = db.exec(
+      `SELECT author_handle, COUNT(*) as c FROM likes
+       WHERE author_handle IS NOT NULL
+       GROUP BY author_handle ORDER BY c DESC LIMIT 15`,
+    );
+    const topAuthors = (topAuthorsRows[0]?.values ?? []).map((row) => ({
+      handle: row[0] as string,
+      count: row[1] as number,
+    }));
+
+    const langRows = db.exec(
+      `SELECT language, COUNT(*) as c FROM likes
+       WHERE language IS NOT NULL
+       GROUP BY language ORDER BY c DESC LIMIT 10`,
+    );
+    const languageBreakdown = (langRows[0]?.values ?? []).map((row) => ({
+      language: row[0] as string,
+      count: row[1] as number,
+    }));
+
+    return {
+      totalLikes: total,
+      uniqueAuthors: authors,
+      dateRange: range,
+      topAuthors,
+      languageBreakdown,
+    };
   } finally {
     db.close();
   }

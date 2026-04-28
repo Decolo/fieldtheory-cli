@@ -238,6 +238,56 @@ test('upsertLikesInArchive inserts and updates likes in one rebuild', async () =
   });
 });
 
+test('upsertLikeInArchive preserves richer existing records when incoming data is sparse', async () => {
+  await withArchiveData(async () => {
+    const result = await upsertLikeInArchive({
+      id: 'l1',
+      tweetId: 'l1',
+      url: 'https://x.com/bob/status/l1',
+      text: 'Sparse like refresh',
+      authorHandle: 'bob',
+      authorName: 'Bob',
+      postedAt: '2026-03-01T00:00:00Z',
+      likedAt: null,
+      syncedAt: '2026-03-04T00:00:00Z',
+      authorProfileImageUrl: 'https://img.example.com/bob.jpg',
+      engagement: { likeCount: 10 },
+      media: ['https://img.example.com/like.jpg'],
+      mediaObjects: [{ type: 'photo', url: 'https://img.example.com/like.jpg' }],
+      links: ['https://example.com/like'],
+      author: { handle: 'bob', name: 'Bob' },
+      language: 'en',
+      quotedTweet: { id: 'ql1', text: 'Quoted like', url: 'https://x.com/q/status/ql1' },
+      ingestedVia: 'graphql',
+    });
+    assert.equal(result.inserted, false);
+
+    const sparseResult = await upsertLikeInArchive({
+      id: 'l1',
+      tweetId: 'l1',
+      url: 'https://x.com/bob/status/l1',
+      text: 'Sparse like refresh',
+      authorHandle: 'bob',
+      authorName: 'Bob',
+      postedAt: '2026-03-01T00:00:00Z',
+      likedAt: null,
+      syncedAt: '2026-03-05T00:00:00Z',
+      links: [],
+      mediaObjects: [],
+      tags: [],
+      ingestedVia: 'browser',
+    });
+
+    assert.equal(sparseResult.inserted, false);
+    const stored = await getLikeById('l1');
+    assert.ok(stored);
+    assert.equal(stored.text, 'Sparse like refresh');
+    assert.equal(stored.likedAt, '2026-03-03T00:00:00Z');
+    assert.equal(stored.mediaCount, 1);
+    assert.equal(stored.linkCount, 1);
+  });
+});
+
 test('upsertBookmarksInArchive inserts and updates bookmarks in one rebuild', async () => {
   await withArchiveData(async () => {
     const result = await upsertBookmarksInArchive([
@@ -263,6 +313,56 @@ test('upsertBookmarksInArchive inserts and updates bookmarks in one rebuild', as
     assert.equal(result.totalRecords, 2);
     assert.equal((await getBookmarkById('b1'))?.text, 'Updated bookmark text again');
     assert.ok(await getBookmarkById('b2'));
+  });
+});
+
+test('upsertBookmarkInArchive preserves richer existing records when incoming data is sparse', async () => {
+  await withArchiveData(async () => {
+    const result = await upsertBookmarkInArchive({
+      id: 'b1',
+      tweetId: 'b1',
+      url: 'https://x.com/alice/status/b1',
+      text: 'Sparse bookmark refresh',
+      authorHandle: 'alice',
+      authorName: 'Alice',
+      postedAt: '2026-03-01T00:00:00Z',
+      bookmarkedAt: '2026-03-05T00:00:00Z',
+      syncedAt: '2026-03-05T00:00:00Z',
+      authorProfileImageUrl: 'https://img.example.com/alice.jpg',
+      engagement: { likeCount: 20 },
+      media: ['https://img.example.com/bookmark.jpg'],
+      mediaObjects: [{ type: 'photo', url: 'https://img.example.com/bookmark.jpg' }],
+      links: ['https://example.com/bookmark'],
+      author: { handle: 'alice', name: 'Alice' },
+      language: 'en',
+      quotedTweet: { id: 'qb1', text: 'Quoted bookmark', url: 'https://x.com/q/status/qb1' },
+      ingestedVia: 'graphql',
+    });
+    assert.equal(result.inserted, false);
+
+    const sparseResult = await upsertBookmarkInArchive({
+      id: 'b1',
+      tweetId: 'b1',
+      url: 'https://x.com/alice/status/b1',
+      text: 'Sparse bookmark refresh',
+      authorHandle: 'alice',
+      authorName: 'Alice',
+      postedAt: '2026-03-01T00:00:00Z',
+      bookmarkedAt: '2026-03-06T00:00:00Z',
+      syncedAt: '2026-03-06T00:00:00Z',
+      links: [],
+      mediaObjects: [],
+      tags: [],
+      ingestedVia: 'browser',
+    });
+
+    assert.equal(sparseResult.inserted, false);
+    const stored = await getBookmarkById('b1');
+    assert.ok(stored);
+    assert.equal(stored.text, 'Sparse bookmark refresh');
+    assert.equal(stored.bookmarkedAt, '2026-03-05T00:00:00Z');
+    assert.equal(stored.mediaCount, 1);
+    assert.equal(stored.linkCount, 1);
   });
 });
 
