@@ -495,8 +495,6 @@ export async function createWebApp(options: WebServerOptions = {}): Promise<Hono
       author: c.req.query('author'),
       after: c.req.query('after'),
       before: c.req.query('before'),
-      category: c.req.query('category'),
-      domain: c.req.query('domain'),
       sort,
       limit,
       offset,

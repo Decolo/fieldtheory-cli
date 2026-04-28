@@ -20,7 +20,7 @@ Search the user's local X/Twitter archives for content relevant to the current t
 - User mentions bookmarks, saved tweets, or X/Twitter content they saved
 - User asks to find something they bookmarked ("find that tweet about...")
 - User asks a question their bookmarks could answer ("what AI tools have I been looking at?")
-- User wants bookmark stats, patterns, or insights
+- User wants bookmark or like stats, patterns, or insights
 - User wants to research one tracked X account's viewpoints over time
 - Starting a task where the user's reading history adds context
 
@@ -36,16 +36,17 @@ Search the user's local X/Twitter archives for content relevant to the current t
 
 \`\`\`bash
 ft bookmarks search <query>              # Full-text BM25 search ("exact phrase", AND, OR, NOT)
-ft bookmarks list --category <cat>       # tool, technique, research, opinion, launch, security, commerce
-ft bookmarks list --domain <dom>         # ai, web-dev, startups, finance, design, devops, marketing, etc.
 ft bookmarks list --author @handle       # By author
 ft bookmarks list --after/--before DATE  # Date range (YYYY-MM-DD)
 ft bookmarks stats                       # Collection overview
 ft bookmarks viz                         # Terminal dashboard
+ft likes stats                           # Likes overview
+ft likes viz                             # Likes terminal dashboard
+ft likes add <id>                        # Like a post and cache it locally
 ft bookmarks show <id>                   # Full detail for one bookmark
 \`\`\`
 
-Combine filters: \`ft bookmarks list --category tool --domain ai --limit 10\`
+Combine filters: \`ft bookmarks list --author @handle --after 2026-01-01 --limit 10\`
 
 ## Guidelines
 

@@ -44,19 +44,24 @@ test('buildIndex creates a searchable database', async () => {
   });
 });
 
-test('buildIndex refreshes existing rows without dropping classifications', async () => {
+test('buildIndex migrates legacy bookmark metadata columns out of the schema', async () => {
   await withIsolatedDataDir(async () => {
     await buildIndex();
 
     const dbPath = twitterBookmarksIndexPath();
     const db = await openDb(dbPath);
     try {
+      db.run('ALTER TABLE bookmarks ADD COLUMN categories TEXT');
+      db.run('ALTER TABLE bookmarks ADD COLUMN primary_category TEXT');
+      db.run('ALTER TABLE bookmarks ADD COLUMN domains TEXT');
+      db.run('ALTER TABLE bookmarks ADD COLUMN primary_domain TEXT');
       db.run(
         `UPDATE bookmarks
          SET categories = ?, primary_category = ?, domains = ?, primary_domain = ?, github_urls = ?
          WHERE id = ?`,
         ['ai,ml', 'research', 'example.com', 'example.com', '["https://github.com/openai/test"]', '1']
       );
+      db.run(`REPLACE INTO meta VALUES ('schema_version', '4')`);
       saveDb(db, dbPath);
     } finally {
       db.close();
@@ -82,11 +87,19 @@ test('buildIndex refreshes existing rows without dropping classifications', asyn
     assert.ok(bookmark);
     assert.equal(bookmark.text, 'Machine learning note updated');
     assert.equal(bookmark.bookmarkedAt, '2026-04-02T00:00:00Z');
-    assert.deepEqual(bookmark.categories, ['ai', 'ml']);
-    assert.equal(bookmark.primaryCategory, 'research');
-    assert.deepEqual(bookmark.domains, ['example.com']);
-    assert.equal(bookmark.primaryDomain, 'example.com');
     assert.deepEqual(bookmark.githubUrls, ['https://github.com/openai/test']);
+
+    const migratedDb = await openDb(dbPath);
+    try {
+      const columns = new Set((migratedDb.exec('PRAGMA table_info(bookmarks)')[0]?.values ?? []).map((row) => String(row[1])));
+      assert.equal(columns.has('categories'), false);
+      assert.equal(columns.has('primary_category'), false);
+      assert.equal(columns.has('domains'), false);
+      assert.equal(columns.has('primary_domain'), false);
+      assert.equal(columns.has('github_urls'), true);
+    } finally {
+      migratedDb.close();
+    }
   });
 });
 

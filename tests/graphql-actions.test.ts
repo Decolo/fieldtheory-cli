@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bookmarkTweet, likeTweet, unfollowAccount, unlikeTweet, unbookmarkTweet } from '../src/graphql-actions.js';
+import { bookmarkTweet, likeTweet, unlikeTweet, unbookmarkTweet } from '../src/graphql-actions.js';
 
 test('unlikeTweet posts the current X web mutation with tweet_id variables', async () => {
   const originalFetch = globalThis.fetch;
@@ -210,38 +210,6 @@ test('unbookmarkTweet does not retry auth failures', async () => {
     );
     assert.equal(requests, 1);
   } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test('unfollowAccount posts the current user_id mutation payload', async () => {
-  const originalFetch = globalThis.fetch;
-  let requestUrl = '';
-  let requestBody = '';
-
-  process.env.FT_X_API_ORIGIN = 'https://x.test';
-  globalThis.fetch = (async (input, init) => {
-    requestUrl = String(input);
-    requestBody = String(init?.body ?? '');
-    return new Response(JSON.stringify({ data: { unfollow_user: 'Done' } }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    });
-  }) as typeof fetch;
-
-  try {
-    const result = await unfollowAccount('42', {
-      csrfToken: 'ct0-token',
-      cookieHeader: 'ct0=ct0-token; auth_token=auth',
-    });
-    assert.equal(result.operation, 'unfollow');
-    assert.match(requestUrl, /https:\/\/x\.test\/i\/api\/graphql\/.*\/UnfollowUser$/);
-    assert.deepEqual(JSON.parse(requestBody), {
-      variables: { user_id: '42' },
-      queryId: process.env.FT_X_UNFOLLOW_QUERY_ID ?? 'vf4QO8QqZ8wZ-0Hj8Vd9pA',
-    });
-  } finally {
-    delete process.env.FT_X_API_ORIGIN;
     globalThis.fetch = originalFetch;
   }
 });

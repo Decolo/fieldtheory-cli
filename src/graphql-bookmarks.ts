@@ -744,13 +744,13 @@ export async function syncBookmarksGraphQL(
 
 const SYNDICATION_URL = process.env.FT_X_SYNDICATION_URL?.trim() || 'https://cdn.syndication.twimg.com/tweet-result';
 
-interface SyndicationResult {
+export interface SyndicationResult {
   snapshot: QuotedTweetSnapshot | null;
   status: 'ok' | 'empty' | 'not_found' | 'forbidden' | 'rate_limited' | 'server_error' | 'error';
   httpStatus?: number;
 }
 
-async function fetchTweetViaSyndication(tweetId: string): Promise<SyndicationResult> {
+export async function fetchTweetViaSyndication(tweetId: string): Promise<SyndicationResult> {
   for (let attempt = 0; attempt < 4; attempt++) {
     const response = await fetch(`${SYNDICATION_URL}?id=${tweetId}&token=x`, {
       headers: {

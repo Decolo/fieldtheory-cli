@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { buildIndex, getBookmarkById } from '../src/bookmarks-db.js';
 import { buildLikesIndex, getLikeById } from '../src/likes-db.js';
+import { buildFeedIndex, getFeedById } from '../src/feed-db.js';
 import { writeJson } from '../src/fs.js';
 
 const execFileAsync = promisify(execFile);
@@ -44,20 +45,40 @@ const LIKE_FIXTURE = {
   ingestedVia: 'graphql',
 };
 
-async function startMockXServer(options: { unlikeStatus?: number; unbookmarkStatus?: number; bookmarkStatus?: number } = {}) {
+const FEED_FIXTURE = {
+  id: 'f1',
+  tweetId: 'f1',
+  url: 'https://x.com/carol/status/f1',
+  text: 'Saved feed item',
+  authorHandle: 'carol',
+  authorName: 'Carol',
+  postedAt: '2026-03-01T00:00:00Z',
+  syncedAt: '2026-03-04T00:00:00Z',
+  sortIndex: '10',
+  fetchPage: 1,
+  fetchPosition: 1,
+  links: [],
+  mediaObjects: [],
+  tags: [],
+  ingestedVia: 'graphql',
+};
+
+async function startMockXServer(options: { unlikeStatus?: number; unbookmarkStatus?: number; bookmarkStatus?: number; likeStatus?: number } = {}) {
   const server = http.createServer(async (req, res) => {
     if (req.url?.startsWith('/tweet-result')) {
       const url = new URL(req.url, 'http://127.0.0.1');
-      assert.equal(url.searchParams.get('id'), 'b1');
+      const id = url.searchParams.get('id');
+      assert.ok(id === 'b1' || id === 'l1');
+      const isLike = id === 'l1';
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
-        id_str: 'b1',
-        text: 'Saved bookmark',
+        id_str: id,
+        text: isLike ? 'Saved like' : 'Saved bookmark',
         created_at: '2026-03-01T00:00:00Z',
         user: {
-          screen_name: 'alice',
-          name: 'Alice',
-          profile_image_url_https: 'https://img.example.com/alice.jpg',
+          screen_name: isLike ? 'bob' : 'alice',
+          name: isLike ? 'Bob' : 'Alice',
+          profile_image_url_https: isLike ? 'https://img.example.com/bob.jpg' : 'https://img.example.com/alice.jpg',
         },
         mediaDetails: [],
       }));
@@ -81,6 +102,14 @@ async function startMockXServer(options: { unlikeStatus?: number; unbookmarkStat
       const status = options.unlikeStatus ?? 200;
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(status === 200 ? JSON.stringify({ data: { unfavorite_tweet: 'Done' } }) : 'upstream failure');
+      return;
+    }
+
+    if (req.url?.includes('/lI07N6Otwv1PhnEgXILM7A/FavoriteTweet')) {
+      assert.equal(parsed.variables?.tweet_id, 'l1');
+      const status = options.likeStatus ?? 200;
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(status === 200 ? JSON.stringify({ data: { favorite_tweet: 'Done' } }) : 'upstream failure');
       return;
     }
 
@@ -208,6 +237,33 @@ test('ft bookmarks add creates the bookmark remotely and refreshes the local arc
   });
 });
 
+test('ft likes add likes the item remotely and refreshes the local archive', async () => {
+  await withCliDataDir(async (dir) => {
+    const mockX = await startMockXServer();
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+
+    try {
+      const { stdout } = await execFileAsync(tsx, ['src/cli.ts', 'likes', 'add', 'l1', '--cookies', 'ct0-token', 'auth'], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          FT_DATA_DIR: dir,
+          FT_X_API_ORIGIN: mockX.origin,
+          FT_X_SYNDICATION_URL: `${mockX.origin}/tweet-result`,
+        },
+      });
+
+      assert.match(stdout, /Liked on X: l1/);
+      assert.match(stdout, /Local archive: updated cached record/);
+      assert.ok(await getLikeById('l1'));
+      const likesCache = await readFile(path.join(dir, 'likes.jsonl'), 'utf8');
+      assert.match(likesCache, /Saved like/);
+    } finally {
+      await mockX.close();
+    }
+  });
+});
+
 test('ft likes unlike does not mutate local cache when the remote mutation fails', async () => {
   await withCliDataDir(async (dir) => {
     const mockX = await startMockXServer({ unlikeStatus: 500 });
@@ -305,6 +361,147 @@ test('ft likes trim keeps the newest likes and removes older ones in batches', a
   } finally {
     delete process.env.FT_DATA_DIR;
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+
+test('ft bookmarks trim keeps the newest bookmarks and removes older ones in batches', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-cli-bookmarks-trim-'));
+  process.env.FT_DATA_DIR = dir;
+
+  const bookmarks = [
+    {
+      ...BOOKMARK_FIXTURE,
+      id: 'b3',
+      tweetId: 'b3',
+      bookmarkedAt: '2026-03-05T00:00:00Z',
+      url: 'https://x.com/alice/status/b3',
+      text: 'Newest bookmark',
+    },
+    {
+      ...BOOKMARK_FIXTURE,
+      id: 'b2',
+      tweetId: 'b2',
+      bookmarkedAt: '2026-03-04T00:00:00Z',
+      url: 'https://x.com/alice/status/b2',
+      text: 'Middle bookmark',
+    },
+    {
+      ...BOOKMARK_FIXTURE,
+      id: 'b1',
+      tweetId: 'b1',
+      bookmarkedAt: '2026-03-03T00:00:00Z',
+      url: 'https://x.com/alice/status/b1',
+      text: 'Oldest bookmark',
+    },
+  ];
+
+  const requests: string[] = [];
+  const server = http.createServer(async (req, res) => {
+    const body = await new Promise<string>((resolve) => {
+      let data = '';
+      req.on('data', (chunk) => { data += chunk; });
+      req.on('end', () => resolve(data));
+    });
+    const parsed = body ? JSON.parse(body) : {};
+    requests.push(parsed.variables?.tweet_id);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ data: { tweet_bookmark_delete: 'Done' } }));
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Failed to bind mock bookmark trim server.');
+
+  try {
+    await writeFile(path.join(dir, 'bookmarks.jsonl'), bookmarks.map((row) => JSON.stringify(row)).join('\n') + '\n');
+    await writeJson(path.join(dir, 'bookmarks-meta.json'), {
+      provider: 'twitter',
+      schemaVersion: 1,
+      totalBookmarks: 3,
+    });
+    await buildIndex({ force: true });
+
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const { stdout } = await execFileAsync(
+      tsx,
+      ['src/cli.ts', 'bookmarks', 'trim', '--keep', '1', '--batch-size', '2', '--pause-seconds', '0', '--cookies', 'ct0-token', 'auth'],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, FT_DATA_DIR: dir, FT_X_API_ORIGIN: `http://127.0.0.1:${address.port}` },
+      },
+    );
+
+    assert.match(stdout, /Removed 2 old bookmarks on X/);
+    assert.deepEqual(requests.sort(), ['b1', 'b2']);
+    assert.ok(await getBookmarkById('b3'));
+    assert.equal(await getBookmarkById('b2'), null);
+    assert.equal(await getBookmarkById('b1'), null);
+  } finally {
+    delete process.env.FT_DATA_DIR;
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('ft feed trim keeps the newest feed items locally', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-cli-feed-trim-'));
+  process.env.FT_DATA_DIR = dir;
+
+  const feed = [
+    {
+      ...FEED_FIXTURE,
+      id: 'f3',
+      tweetId: 'f3',
+      syncedAt: '2026-03-05T00:00:00Z',
+      url: 'https://x.com/carol/status/f3',
+      text: 'Newest feed item',
+    },
+    {
+      ...FEED_FIXTURE,
+      id: 'f2',
+      tweetId: 'f2',
+      syncedAt: '2026-03-04T00:00:00Z',
+      url: 'https://x.com/carol/status/f2',
+      text: 'Middle feed item',
+    },
+    {
+      ...FEED_FIXTURE,
+      id: 'f1',
+      tweetId: 'f1',
+      syncedAt: '2026-03-03T00:00:00Z',
+      url: 'https://x.com/carol/status/f1',
+      text: 'Oldest feed item',
+    },
+  ];
+
+  try {
+    await writeFile(path.join(dir, 'feed.jsonl'), feed.map((row) => JSON.stringify(row)).join('\n') + '\n');
+    await writeJson(path.join(dir, 'feed-meta.json'), {
+      provider: 'twitter',
+      schemaVersion: 1,
+      totalItems: 3,
+      totalSkippedEntries: 0,
+    });
+    await buildFeedIndex({ force: true });
+
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const { stdout } = await execFileAsync(
+      tsx,
+      ['src/cli.ts', 'feed', 'trim', '--keep', '1', '--batch-size', '2', '--pause-seconds', '0'],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, FT_DATA_DIR: dir },
+      },
+    );
+
+    assert.match(stdout, /Removed 2 old feed items locally/);
+    assert.ok(await getFeedById('f3'));
+    assert.equal(await getFeedById('f2'), null);
+    assert.equal(await getFeedById('f1'), null);
+  } finally {
+    delete process.env.FT_DATA_DIR;
     await rm(dir, { recursive: true, force: true });
   }
 });

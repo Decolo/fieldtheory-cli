@@ -2,10 +2,21 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { ensureDir, pathExists, readJson, readJsonLines, writeJson } from './fs.js';
-import { bookmarkMediaDir, bookmarkMediaManifestPath, twitterBookmarksCachePath } from './paths.js';
-import type { BookmarkRecord } from './types.js';
+import {
+  bookmarkMediaDir,
+  bookmarkMediaManifestPath,
+  likeMediaDir,
+  likeMediaManifestPath,
+  twitterBookmarksCachePath,
+  twitterLikesCachePath,
+} from './paths.js';
+import type { ArchiveItem, BookmarkMediaVariant } from './types.js';
+
+export type MediaFetchSource = 'bookmarks' | 'likes';
 
 export interface MediaFetchEntry {
+  source: MediaFetchSource;
+  recordId: string;
   bookmarkId: string;
   tweetId: string;
   tweetUrl: string;
@@ -45,27 +56,41 @@ function sanitizeExtFromContentType(contentType?: string, sourceUrl?: string): s
   return '.bin';
 }
 
-async function loadManifest(): Promise<MediaFetchManifest | null> {
-  const manifestPath = bookmarkMediaManifestPath();
+async function loadManifest(manifestPath: string): Promise<MediaFetchManifest | null> {
   if (!(await pathExists(manifestPath))) return null;
   return readJson<MediaFetchManifest>(manifestPath);
 }
 
-export async function fetchBookmarkMediaBatch(
-  options: { limit?: number; maxBytes?: number } = {}
+function mediaPathsForSource(source: MediaFetchSource): { cachePath: string; mediaDir: string; manifestPath: string } {
+  if (source === 'likes') {
+    return {
+      cachePath: twitterLikesCachePath(),
+      mediaDir: likeMediaDir(),
+      manifestPath: likeMediaManifestPath(),
+    };
+  }
+  return {
+    cachePath: twitterBookmarksCachePath(),
+    mediaDir: bookmarkMediaDir(),
+    manifestPath: bookmarkMediaManifestPath(),
+  };
+}
+
+export async function fetchArchiveMediaBatch(
+  options: { source: MediaFetchSource; limit?: number; maxBytes?: number }
 ): Promise<MediaFetchManifest> {
+  const source = options.source;
   const limit = options.limit ?? 100;
   const maxBytes = options.maxBytes ?? 50 * 1024 * 1024;
-  const mediaDir = bookmarkMediaDir();
-  const manifestPath = bookmarkMediaManifestPath();
+  const { cachePath, mediaDir, manifestPath } = mediaPathsForSource(source);
   await ensureDir(mediaDir);
 
-  const bookmarks = await readJsonLines<BookmarkRecord>(twitterBookmarksCachePath());
-  const candidates = bookmarks
-    .filter((b) => (b.media?.length ?? 0) > 0 || (b.mediaObjects?.length ?? 0) > 0 || b.authorProfileImageUrl)
+  const records = await readJsonLines<ArchiveItem>(cachePath);
+  const candidates = records
+    .filter((record) => (record.media?.length ?? 0) > 0 || (record.mediaObjects?.length ?? 0) > 0 || record.authorProfileImageUrl)
     .slice(0, limit);
-  const previous = await loadManifest();
-  const priorKeys = new Set((previous?.entries ?? []).map((e) => `${e.bookmarkId}::${e.sourceUrl}`));
+  const previous = await loadManifest(manifestPath);
+  const priorKeys = new Set((previous?.entries ?? []).map((e) => `${e.recordId ?? e.bookmarkId}::${e.sourceUrl}`));
   const entries: MediaFetchEntry[] = previous?.entries ? [...previous.entries] : [];
 
   let downloaded = 0;
@@ -73,32 +98,32 @@ export async function fetchBookmarkMediaBatch(
   let failed = 0;
   let processed = 0;
 
-  for (const bookmark of candidates) {
+  for (const record of candidates) {
     // Resolve media URLs: prefer mediaObjects (richer, includes video variants), fall back to media[]
     const mediaUrls: string[] = [];
-    if (bookmark.mediaObjects?.length) {
-      for (const mo of bookmark.mediaObjects) {
+    if (record.mediaObjects?.length) {
+      for (const mo of record.mediaObjects) {
         if (mo.type === 'video' || mo.type === 'animated_gif') {
           const mp4s = (mo.videoVariants ?? mo.variants ?? [])
-            .filter((v) => v.url && (!v.contentType || v.contentType === 'video/mp4'))
-            .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
+            .filter((variant: BookmarkMediaVariant) => variant.url && (!variant.contentType || variant.contentType === 'video/mp4'))
+            .sort((a: BookmarkMediaVariant, b: BookmarkMediaVariant) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
           if (mp4s.length > 0 && mp4s[0].url) { mediaUrls.push(mp4s[0].url); continue; }
         }
         const mediaUrl = mo.url ?? mo.mediaUrl;
         if (mediaUrl) mediaUrls.push(mediaUrl);
       }
     } else {
-      mediaUrls.push(...(bookmark.media ?? []));
+      mediaUrls.push(...(record.media ?? []));
     }
 
     // Also include author profile image (upgraded to 400x400)
-    if (bookmark.authorProfileImageUrl) {
-      const fullUrl = bookmark.authorProfileImageUrl.replace('_normal.', '_400x400.');
-      if (!priorKeys.has(`${bookmark.id}::${fullUrl}`)) mediaUrls.push(fullUrl);
+    if (record.authorProfileImageUrl) {
+      const fullUrl = record.authorProfileImageUrl.replace('_normal.', '_400x400.');
+      if (!priorKeys.has(`${record.id}::${fullUrl}`)) mediaUrls.push(fullUrl);
     }
 
     for (const sourceUrl of mediaUrls) {
-      const key = `${bookmark.id}::${sourceUrl}`;
+      const key = `${record.id}::${sourceUrl}`;
       if (priorKeys.has(key)) continue;
       processed += 1;
 
@@ -112,11 +137,13 @@ export async function fetchBookmarkMediaBatch(
 
         if (typeof declaredBytes === 'number' && !Number.isNaN(declaredBytes) && declaredBytes > maxBytes) {
           entries.push({
-            bookmarkId: bookmark.id,
-            tweetId: bookmark.tweetId,
-            tweetUrl: bookmark.url,
-            authorHandle: bookmark.authorHandle,
-            authorName: bookmark.authorName,
+            source,
+            recordId: record.id,
+            bookmarkId: record.id,
+            tweetId: record.tweetId,
+            tweetUrl: record.url,
+            authorHandle: record.authorHandle,
+            authorName: record.authorName,
             sourceUrl,
             contentType,
             bytes: declaredBytes,
@@ -131,11 +158,13 @@ export async function fetchBookmarkMediaBatch(
         const response = await fetch(sourceUrl);
         if (!response.ok) {
           entries.push({
-            bookmarkId: bookmark.id,
-            tweetId: bookmark.tweetId,
-            tweetUrl: bookmark.url,
-            authorHandle: bookmark.authorHandle,
-            authorName: bookmark.authorName,
+            source,
+            recordId: record.id,
+            bookmarkId: record.id,
+            tweetId: record.tweetId,
+            tweetUrl: record.url,
+            authorHandle: record.authorHandle,
+            authorName: record.authorName,
             sourceUrl,
             status: 'failed',
             reason: `HTTP ${response.status}`,
@@ -148,11 +177,13 @@ export async function fetchBookmarkMediaBatch(
         const buffer = Buffer.from(await response.arrayBuffer());
         if (buffer.byteLength > maxBytes) {
           entries.push({
-            bookmarkId: bookmark.id,
-            tweetId: bookmark.tweetId,
-            tweetUrl: bookmark.url,
-            authorHandle: bookmark.authorHandle,
-            authorName: bookmark.authorName,
+            source,
+            recordId: record.id,
+            bookmarkId: record.id,
+            tweetId: record.tweetId,
+            tweetUrl: record.url,
+            authorHandle: record.authorHandle,
+            authorName: record.authorName,
             sourceUrl,
             contentType: response.headers.get('content-type') ?? contentType ?? undefined,
             bytes: buffer.byteLength,
@@ -166,16 +197,18 @@ export async function fetchBookmarkMediaBatch(
 
         const digest = createHash('sha256').update(buffer).digest('hex').slice(0, 16);
         const ext = sanitizeExtFromContentType(response.headers.get('content-type') ?? contentType ?? undefined, sourceUrl);
-        const filename = `${bookmark.tweetId}-${digest}${ext}`;
+        const filename = `${record.tweetId}-${digest}${ext}`;
         const localPath = path.join(mediaDir, filename);
         await writeFile(localPath, buffer);
 
         entries.push({
-          bookmarkId: bookmark.id,
-          tweetId: bookmark.tweetId,
-          tweetUrl: bookmark.url,
-          authorHandle: bookmark.authorHandle,
-          authorName: bookmark.authorName,
+          source,
+          recordId: record.id,
+          bookmarkId: record.id,
+          tweetId: record.tweetId,
+          tweetUrl: record.url,
+          authorHandle: record.authorHandle,
+          authorName: record.authorName,
           sourceUrl,
           localPath,
           contentType: response.headers.get('content-type') ?? contentType ?? undefined,
@@ -186,11 +219,13 @@ export async function fetchBookmarkMediaBatch(
         downloaded += 1;
       } catch (error) {
         entries.push({
-          bookmarkId: bookmark.id,
-          tweetId: bookmark.tweetId,
-          tweetUrl: bookmark.url,
-          authorHandle: bookmark.authorHandle,
-          authorName: bookmark.authorName,
+          source,
+          recordId: record.id,
+          bookmarkId: record.id,
+          tweetId: record.tweetId,
+          tweetUrl: record.url,
+          authorHandle: record.authorHandle,
+          authorName: record.authorName,
           sourceUrl,
           status: 'failed',
           reason: error instanceof Error ? error.message : String(error),
@@ -215,4 +250,16 @@ export async function fetchBookmarkMediaBatch(
 
   await writeJson(manifestPath, manifest);
   return manifest;
+}
+
+export async function fetchBookmarkMediaBatch(
+  options: { limit?: number; maxBytes?: number } = {}
+): Promise<MediaFetchManifest> {
+  return fetchArchiveMediaBatch({ ...options, source: 'bookmarks' });
+}
+
+export async function fetchLikeMediaBatch(
+  options: { limit?: number; maxBytes?: number } = {}
+): Promise<MediaFetchManifest> {
+  return fetchArchiveMediaBatch({ ...options, source: 'likes' });
 }

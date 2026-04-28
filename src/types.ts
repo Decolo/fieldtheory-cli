@@ -197,87 +197,38 @@ export interface AccountTimelineState {
   lastCursor?: string;
 }
 
-export type FollowedAccountState = 'active' | 'protected' | 'suspended' | 'unavailable' | 'unfollowed';
+export type ArchiveExportResource = 'bookmarks' | 'likes' | 'feed' | 'accounts';
+export type ArchiveExportSource = 'bookmark' | 'like' | 'feed' | 'account';
 
-export interface FollowedAccountSnapshot {
-  userId: string;
-  handle: string;
-  name?: string;
-  description?: string;
-  profileImageUrl?: string;
-  followersCount?: number;
-  followingCount?: number;
-  statusesCount?: number;
-  verified?: boolean;
-  protected?: boolean;
-  state: FollowedAccountState;
-  sourceUserId?: string;
-  lastPostedAt?: string | null;
-  lastSyncedAt: string;
+export interface ArchiveExportFilters {
+  query?: string;
+  author?: string;
+  after?: string;
+  before?: string;
+  limit?: number;
 }
 
-export type AccountRelevanceLabelValue = 'valuable' | 'not-valuable' | 'neutral';
-
-export interface AccountRelevanceLabel {
-  targetUserId: string;
-  currentHandle: string;
-  value: AccountRelevanceLabelValue;
-  updatedAt: string;
-  note?: string;
+export interface ArchiveExportItem {
+  id: string;
+  tweetId: string;
+  url: string;
+  text: string;
+  authorHandle?: string;
+  authorName?: string;
+  postedAt?: string | null;
+  collectedAt?: string | null;
+  source: ArchiveExportSource;
+  sourceDetails: Record<string, unknown>;
 }
 
-export type AccountReviewStage = 'stage1' | 'stage2';
-export type AccountReviewDisposition = 'healthy' | 'candidate' | 'deferred' | 'unfollowed';
-export type AccountReviewReason = 'inactive' | 'low_engagement' | 'low_relevance' | 'uncertain';
-
-export interface AccountReviewEvidence {
-  inactivityDays?: number;
-  inactivityThresholdDays?: number;
-  followerCount?: number;
-  avgLikeCount?: number;
-  avgReplyCount?: number;
-  avgViewCount?: number;
-  label?: AccountRelevanceLabelValue;
-  fetchStatus?: 'cached' | 'fetched' | 'failed' | 'unavailable';
-  note?: string;
-}
-
-export interface AccountReviewResult {
-  targetUserId: string;
-  handle: string;
-  name?: string;
-  stage: AccountReviewStage;
-  disposition: AccountReviewDisposition;
-  primaryReason: AccountReviewReason;
-  score: number;
-  evidence: AccountReviewEvidence;
-  lastPostedAt?: string | null;
-  lastEvaluatedAt: string;
-}
-
-export interface FollowingReviewState {
-  provider: 'twitter';
-  schemaVersion: number;
-  sourceUserId?: string;
-  lastFollowingSyncAt?: string;
-  followingSnapshotComplete: boolean;
-  lastReviewRunAt?: string;
-  lastReviewCount: number;
-  totalFollowing: number;
-  candidateCount: number;
-  deepScannedUserIds: string[];
-  lastCursor?: string;
-}
-
-export interface FollowingAccountEvidenceCache {
-  targetUserId: string;
-  handle: string;
-  fetchedAt: string;
-  recordCount: number;
-  lastPostedAt?: string | null;
-  avgLikeCount?: number;
-  avgReplyCount?: number;
-  avgViewCount?: number;
+export interface ArchiveExportPayload {
+  resource: ArchiveExportResource;
+  items: ArchiveExportItem[];
+  meta: {
+    count: number;
+    generatedAt: string;
+    filters: Record<string, string | number>;
+  };
 }
 
 export interface XOAuthTokenSet {
@@ -387,15 +338,13 @@ export interface FeedConversationStoreState {
   records: Record<string, FeedConversationFetchState>;
 }
 
-export type FeedDaemonStage = 'fetch' | 'semantic' | 'tick';
+export type FeedDaemonStage = 'fetch' | 'tick';
 export type FeedDaemonOutcome = 'success' | 'error';
 export type FeedDaemonErrorKind =
   | 'network'
   | 'auth'
   | 'rate_limit'
   | 'upstream'
-  | 'semantic'
-  | 'config'
   | 'unknown';
 
 export interface FeedDaemonLastTick {
@@ -409,7 +358,6 @@ export interface FeedDaemonLastTick {
   durationMs: number;
   fetchAdded?: number;
   fetchTotalItems?: number;
-  indexedItems?: number;
 }
 
 export interface FeedDaemonState {
@@ -420,44 +368,7 @@ export interface FeedDaemonState {
   lastTickFinishedAt?: string;
   lastFetchAdded?: number;
   lastFetchTotalItems?: number;
-  lastIndexedItems?: number;
   lastError?: string;
   intervalMs?: number;
   lastTick?: FeedDaemonLastTick;
-}
-
-export type EmbeddingProviderName = 'aliyun-bailian' | 'openai-compatible';
-export type SemanticDocumentSource = 'feed' | 'likes' | 'bookmarks';
-
-export interface SemanticMeta {
-  schemaVersion: number;
-  provider: EmbeddingProviderName;
-  model: string;
-  baseUrl: string;
-  dimensions: number;
-  embeddingVersion: string;
-  updatedAt: string;
-  lastFullRebuildAt?: string;
-  documents: Record<SemanticDocumentSource, number>;
-}
-
-export interface SemanticDocumentRow {
-  id: string;
-  source: SemanticDocumentSource;
-  tweetId: string;
-  url: string;
-  authorHandle?: string;
-  authorName?: string;
-  postedAt?: string | null;
-  text: string;
-  textHash: string;
-  embeddingVersion: string;
-  vector: number[];
-}
-
-export interface SemanticSearchHit {
-  id: string;
-  distance: number;
-  score: number;
-  row: SemanticDocumentRow;
 }

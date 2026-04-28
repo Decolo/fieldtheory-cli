@@ -61,10 +61,6 @@ export interface BookmarkItem {
   authorProfileImageUrl?: string;
   postedAt?: string | null;
   bookmarkedAt?: string | null;
-  categories: string[];
-  primaryCategory?: string | null;
-  domains: string[];
-  primaryDomain?: string | null;
   githubUrls: string[];
   links: string[];
   mediaCount: number;

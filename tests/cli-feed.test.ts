@@ -64,7 +64,9 @@ test('buildCli feed group no longer exposes agent or prefs commands', () => {
   assert.equal(feed.commands.some((command) => command.name() === 'prefs'), false);
   assert.equal(feed.commands.some((command) => command.name() === 'daemon'), true);
   assert.equal(feed.commands.some((command) => command.name() === 'context'), true);
-  assert.equal(feed.commands.some((command) => command.name() === 'semantic'), true);
+  assert.equal(feed.commands.some((command) => command.name() === 'search'), true);
+  assert.equal(feed.commands.some((command) => command.name() === 'index'), true);
+  assert.equal(feed.commands.some((command) => command.name() === 'semantic'), false);
 });
 
 test('feed daemon help reflects collection-only behavior', () => {
@@ -128,6 +130,41 @@ test('ft feed list lists cached feed items', async () => {
 
     assert.match(stdout, /@alice/);
     assert.match(stdout, /https:\/\/x\.com\/alice\/status\/1/);
+  });
+});
+
+test('ft feed search returns ranked cached feed items', async () => {
+  await withFeedDataDir(async (dir) => {
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const { stdout } = await execFileAsync(tsx, ['src/cli.ts', 'feed', 'search', 'machine learning'], {
+      cwd: process.cwd(),
+      env: { ...process.env, FT_DATA_DIR: dir },
+    });
+
+    assert.match(stdout, /\[2026-04-12\]/);
+    assert.match(stdout, /@alice/);
+    assert.match(stdout, /Machine learning agents are getting better/);
+    assert.match(stdout, /https:\/\/x\.com\/alice\/status\/1/);
+  });
+});
+
+test('ft feed export prints canonical archive JSON', async () => {
+  await withFeedDataDir(async (dir) => {
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const { stdout } = await execFileAsync(tsx, ['src/cli.ts', 'feed', 'export', '--author', 'alice', '--after', '2026-04-01'], {
+      cwd: process.cwd(),
+      env: { ...process.env, FT_DATA_DIR: dir },
+    });
+
+    const payload = JSON.parse(stdout);
+    assert.equal(payload.resource, 'feed');
+    assert.equal(payload.meta.count, 1);
+    assert.equal(payload.meta.filters.author, 'alice');
+    assert.equal(payload.meta.filters.after, '2026-04-01');
+    assert.equal(payload.items[0].source, 'feed');
+    assert.equal(payload.items[0].tweetId, '1');
+    assert.equal(payload.items[0].collectedAt, '2026-04-12T14:00:00Z');
+    assert.equal(payload.items[0].sourceDetails.sortIndex, '2000');
   });
 });
 
@@ -197,6 +234,20 @@ test('ft feed show --json preserves the feed item shape and adds optional conver
     assert.equal(payload.authorHandle, 'alice');
     assert.ok(payload.conversationContext);
     assert.equal(payload.conversationContext.rootFeedTweetId, '1');
+  });
+});
+
+test('ft feed index rebuilds the feed search index', async () => {
+  await withFeedDataDir(async (dir) => {
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const { stdout, stderr } = await execFileAsync(tsx, ['src/cli.ts', 'feed', 'index', '--force'], {
+      cwd: process.cwd(),
+      env: { ...process.env, FT_DATA_DIR: dir },
+    });
+
+    assert.match(stderr, /Building feed search index/);
+    assert.match(stdout, /Indexed 1 feed items \(1 new\)/);
+    assert.match(stdout, /feed\.db/);
   });
 });
 

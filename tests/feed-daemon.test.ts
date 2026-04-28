@@ -21,7 +21,6 @@ test('formatFeedDaemonStatus renders structured last-tick summaries', async () =
     lastTickFinishedAt: '2026-04-15T10:55:36.951Z',
     lastFetchAdded: 2,
     lastFetchTotalItems: 20,
-    lastIndexedItems: 2,
     lastTick: {
       tickId: 'tick-1',
       startedAt: '2026-04-15T10:52:25.763Z',
@@ -32,7 +31,6 @@ test('formatFeedDaemonStatus renders structured last-tick summaries', async () =
       durationMs: 1234,
       fetchAdded: 2,
       fetchTotalItems: 20,
-      indexedItems: 2,
     },
   };
 
@@ -46,7 +44,7 @@ test('formatFeedDaemonStatus renders structured last-tick summaries', async () =
     assert.match(status, /last error kind: none/);
     assert.match(status, /last summary: Feed daemon tick completed successfully\./);
     assert.match(status, /last duration: 1234ms/);
-    assert.match(status, /last indexed items: 2/);
+    assert.doesNotMatch(status, /last indexed items/);
   } finally {
     delete process.env.FT_DATA_DIR;
     await rm(tmpDir, { recursive: true, force: true });
@@ -108,14 +106,13 @@ test('getFeedDaemonState rewrites legacy action-era state to the collection-only
 
     assert.equal(state.schemaVersion, 2);
     assert.equal(state.lastTick?.stage, 'tick');
-    assert.equal(state.lastIndexedItems, undefined);
     assert.equal(persisted.schemaVersion, 2);
     assert.equal(persisted.lastTick?.stage, 'tick');
 
     const status = await formatFeedDaemonStatus();
 
     assert.match(status, /last fetch added: 3/);
-    assert.match(status, /last indexed items: 0/);
+    assert.doesNotMatch(status, /last indexed items/);
     assert.match(status, /last stage: tick/);
     assert.match(status, /Legacy feed daemon tick completed successfully\./);
   } finally {

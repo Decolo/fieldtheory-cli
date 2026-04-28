@@ -1,6 +1,6 @@
 import { openDb } from './db.js';
 import { parseTimestampMs, toIsoDate, toIsoMonth, toMonthDayLabel, toUtcHour, toWeekdayShort, toYearLabel } from './date-utils.js';
-import { twitterBookmarksIndexPath } from './paths.js';
+import { twitterLikesIndexPath } from './paths.js';
 
 // ── ANSI helpers ─────────────────────────────────────────────────────────────
 
@@ -116,7 +116,7 @@ function lerpColor(
 
 // ── Data queries ─────────────────────────────────────────────────────────────
 
-interface GemBookmark {
+interface GemLike {
   author: string;
   text: string;
   tweetId: string;
@@ -136,8 +136,8 @@ interface VizData {
   recentAuthors: { handle: string; count: number }[];
   languages: { lang: string; count: number }[];
   avgTextLength: number;
-  timeCapsules: GemBookmark[];
-  hiddenGems: GemBookmark[];
+  timeCapsules: GemLike[];
+  hiddenGems: GemLike[];
   risingVoices: { handle: string; count: number }[];
 }
 
@@ -269,14 +269,14 @@ function aggregateTimelineData(rows: TimelineAggregateRow[]): {
 }
 
 async function queryVizData(): Promise<VizData> {
-  const db = await openDb(twitterBookmarksIndexPath());
+  const db = await openDb(twitterLikesIndexPath());
 
   try {
-    const total = db.exec('SELECT COUNT(*) FROM bookmarks')[0]?.values[0]?.[0] as number;
-    const authors = db.exec('SELECT COUNT(DISTINCT author_handle) FROM bookmarks')[0]?.values[0]?.[0] as number;
+    const total = db.exec('SELECT COUNT(*) FROM likes')[0]?.values[0]?.[0] as number;
+    const authors = db.exec('SELECT COUNT(DISTINCT author_handle) FROM likes')[0]?.values[0]?.[0] as number;
     const timelineRows = db.exec(
       `SELECT author_handle, posted_at, synced_at
-       FROM bookmarks
+       FROM likes
        WHERE posted_at IS NOT NULL OR synced_at IS NOT NULL OR author_handle IS NOT NULL`
     );
     const timelineData = aggregateTimelineData(
@@ -288,14 +288,14 @@ async function queryVizData(): Promise<VizData> {
     );
 
     const topAuthorsRows = db.exec(
-      `SELECT author_handle, COUNT(*) as c FROM bookmarks
+      `SELECT author_handle, COUNT(*) as c FROM likes
        WHERE author_handle IS NOT NULL
        GROUP BY author_handle ORDER BY c DESC LIMIT 20`
     );
 
     // Domains from links_json
     const domainRows = db.exec(
-      `SELECT links_json FROM bookmarks WHERE links_json IS NOT NULL AND links_json != '[]'`
+      `SELECT links_json FROM likes WHERE links_json IS NOT NULL AND links_json != '[]'`
     );
     const domainCounts = new Map<string, number>();
     for (const row of domainRows[0]?.values ?? []) {
@@ -318,41 +318,41 @@ async function queryVizData(): Promise<VizData> {
       .map(([domain, count]) => ({ domain, count }));
 
     const mediaStats = {
-      withMedia: db.exec('SELECT COUNT(*) FROM bookmarks WHERE media_count > 0')[0]?.values[0]?.[0] as number,
-      withLinks: db.exec('SELECT COUNT(*) FROM bookmarks WHERE link_count > 0')[0]?.values[0]?.[0] as number,
+      withMedia: db.exec('SELECT COUNT(*) FROM likes WHERE media_count > 0')[0]?.values[0]?.[0] as number,
+      withLinks: db.exec('SELECT COUNT(*) FROM likes WHERE link_count > 0')[0]?.values[0]?.[0] as number,
       total,
     };
 
     const langRows = db.exec(
-      `SELECT language, COUNT(*) as c FROM bookmarks WHERE language IS NOT NULL
+      `SELECT language, COUNT(*) as c FROM likes WHERE language IS NOT NULL
        GROUP BY language ORDER BY c DESC LIMIT 8`
     );
 
-    const avgLen = db.exec('SELECT AVG(length(text)) FROM bookmarks')[0]?.values[0]?.[0] as number;
+    const avgLen = db.exec('SELECT AVG(length(text)) FROM likes')[0]?.values[0]?.[0] as number;
 
     // Time capsules: oldest posts, one per year to spread the range
     const capsuleRows = db.exec(
       `SELECT author_handle, text, tweet_id, posted_at, substr(posted_at, -4) as yr
-       FROM bookmarks
+       FROM likes
        WHERE posted_at IS NOT NULL
        AND CAST(substr(posted_at, -4) AS INTEGER) < 2023
        GROUP BY substr(posted_at, -4)
        ORDER BY posted_at ASC
        LIMIT 8`
     );
-    const timeCapsules: GemBookmark[] = (capsuleRows[0]?.values ?? []).map((r) => ({
+    const timeCapsules: GemLike[] = (capsuleRows[0]?.values ?? []).map((r) => ({
       author: r[0] as string,
       text: r[1] as string,
       tweetId: r[2] as string,
       postedAt: r[3] as string,
     }));
 
-    // Hidden gems: authors bookmarked exactly once, with long text (> 250 chars)
+    // Hidden gems: authors liked exactly once, with long text (> 250 chars)
     const gemRows = db.exec(
       `SELECT b.author_handle, b.text, b.tweet_id, b.posted_at
-       FROM bookmarks b
+       FROM likes b
        JOIN (
-         SELECT author_handle FROM bookmarks
+         SELECT author_handle FROM likes
          WHERE author_handle IS NOT NULL
          GROUP BY author_handle HAVING COUNT(*) = 1
        ) singles ON b.author_handle = singles.author_handle
@@ -360,7 +360,7 @@ async function queryVizData(): Promise<VizData> {
        ORDER BY length(b.text) DESC
        LIMIT 8`
     );
-    const hiddenGems: GemBookmark[] = (gemRows[0]?.values ?? []).map((r) => ({
+    const hiddenGems: GemLike[] = (gemRows[0]?.values ?? []).map((r) => ({
       author: r[0] as string,
       text: r[1] as string,
       tweetId: r[2] as string,
@@ -405,11 +405,11 @@ function renderHeader(data: VizData): string[] {
   lines.push('');
   lines.push(boxTop(W));
   lines.push(boxRow(
-    `${C.title}${BOLD}  ✦  FIELD THEORY  ·  BOOKMARK OBSERVATORY  ✦  ${RESET}`, W
+    `${C.title}${BOLD}  ✦  FIELD THEORY  ·  LIKE OBSERVATORY  ✦  ${RESET}`, W
   ));
   lines.push(boxDivider(W));
   lines.push(boxRow(
-    `${C.text}${data.total.toLocaleString()} bookmarks${C.dim}  ·  ${C.text}${data.uniqueAuthors.toLocaleString()} voices${C.dim}  ·  ${C.text}${data.languages.length} languages`, W
+    `${C.text}${data.total.toLocaleString()} likes${C.dim}  ·  ${C.text}${data.uniqueAuthors.toLocaleString()} voices${C.dim}  ·  ${C.text}${data.languages.length} languages`, W
   ));
   lines.push(boxRow(
     `${C.dim}${data.dateRange.earliest} → ${data.dateRange.latest}`, W
@@ -425,7 +425,7 @@ function renderTopAuthors(data: VizData): string[] {
 
   lines.push('');
   lines.push(`  ${C.accent}${BOLD}WHO YOU LISTEN TO${RESET}`);
-  lines.push(`  ${C.dim}top 20 most-bookmarked voices${RESET}`);
+  lines.push(`  ${C.dim}top 20 most-liked voices${RESET}`);
   lines.push('');
 
   for (const author of data.topAuthors) {
@@ -566,7 +566,7 @@ function renderDomains(data: VizData): string[] {
 
   lines.push('');
   lines.push(`  ${C.violet}${BOLD}WHERE LINKS LEAD${RESET}`);
-  lines.push(`  ${C.dim}most-bookmarked external domains${RESET}`);
+  lines.push(`  ${C.dim}most-liked external domains${RESET}`);
   lines.push('');
 
   for (const d of data.topDomains) {
@@ -587,7 +587,7 @@ function renderMediaBreakdown(data: VizData): string[] {
 
   lines.push('');
   lines.push(`  ${C.gold}${BOLD}COMPOSITION${RESET}`);
-  lines.push(`  ${C.dim}what your bookmarks contain${RESET}`);
+  lines.push(`  ${C.dim}what your likes contain${RESET}`);
   lines.push('');
 
   const barWidth = 50;
@@ -628,9 +628,9 @@ function renderFingerprint(data: VizData): string[] {
     ? (((data.uniqueAuthors - data.topAuthors.length) / data.uniqueAuthors) * 100).toFixed(0)
     : '0';
 
-  lines.push(boxRow(`${C.dim}avg bookmark length${RESET}    ${C.text}${Math.round(data.avgTextLength)} chars${RESET}`, W));
+  lines.push(boxRow(`${C.dim}avg like length${RESET}    ${C.text}${Math.round(data.avgTextLength)} chars${RESET}`, W));
   lines.push(boxRow(`${C.dim}media-bearing${RESET}          ${C.text}${mediaPct}%${RESET}`, W));
-  lines.push(boxRow(`${C.dim}long-tail authors${RESET}      ${C.text}${longTailPct}% bookmarked ≤ once${RESET}`, W));
+  lines.push(boxRow(`${C.dim}long-tail authors${RESET}      ${C.text}${longTailPct}% liked ≤ once${RESET}`, W));
   lines.push(boxRow(`${C.dim}top voice${RESET}              ${C.text}@${data.topAuthors[0]?.handle ?? '?'} (${data.topAuthors[0]?.count ?? 0})${RESET}`, W));
 
   if (data.recentAuthors.length > 0) {
@@ -657,7 +657,7 @@ function renderTimeCapsules(data: VizData): string[] {
 
   lines.push('');
   lines.push(`  ${C.gold}${BOLD}TIME CAPSULES${RESET}`);
-  lines.push(`  ${C.dim}your oldest bookmarked posts — still saved after all these years${RESET}`);
+  lines.push(`  ${C.dim}your oldest liked posts — still saved after all these years${RESET}`);
   lines.push('');
 
   for (const b of data.timeCapsules) {
@@ -679,7 +679,7 @@ function renderHiddenGems(data: VizData): string[] {
 
   lines.push('');
   lines.push(`  ${C.cyan}${BOLD}HIDDEN GEMS${RESET}`);
-  lines.push(`  ${C.dim}one-time voices you saved — long, substantive, easy to forget${RESET}`);
+  lines.push(`  ${C.dim}one-time voices you liked — long, substantive, easy to forget${RESET}`);
   lines.push('');
 
   for (const b of data.hiddenGems) {
@@ -700,7 +700,7 @@ function renderRisingVoices(data: VizData): string[] {
 
   lines.push('');
   lines.push(`  ${C.green}${BOLD}RISING${RESET}`);
-  lines.push(`  ${C.dim}voices concentrated in the latest publication month in your library${RESET}`);
+  lines.push(`  ${C.dim}voices concentrated in the latest publication month in your likes${RESET}`);
   lines.push('');
 
   for (const v of data.risingVoices) {
@@ -713,7 +713,7 @@ function renderRisingVoices(data: VizData): string[] {
 
 // ── Main render ──────────────────────────────────────────────────────────────
 
-export async function renderViz(): Promise<string> {
+export async function renderLikeViz(): Promise<string> {
   const data = await queryVizData();
 
   const sections = [

@@ -43,7 +43,7 @@ This is deep work because it adds a new X-contract integration surface, a new lo
 - `src/graphql-feed.ts` already normalizes `conversationId`, `inReplyTo*`, `quotedStatusId`, `quotedTweet`, and engagement counts into `FeedRecord`. This is the natural seed data for deciding which conversations to expand.
 - `src/archive-core.ts` and `src/types.ts` show that the repo already treats tweet-like records as canonical archive items with source-specific attachments. A conversation sidecar should complement that model, not distort it.
 - `src/account-export.ts` and `src/graphql-account-timeline.ts` demonstrate that richer reply/quote context already matters to downstream research workflows in this repo.
-- `src/paths.ts` and the following-review modules added on 2026-04-19 are the closest precedent for introducing a new sidecar local dataset instead of overloading an existing cache.
+- `src/paths.ts` already shows the repo's preferred pattern for adding sidecar local datasets instead of overloading an existing cache.
 - `tests/graphql-feed.test.ts`, `tests/graphql-account-timeline.test.ts`, and `tests/graphql-bookmarks.test.ts` already validate quote/reply field parsing patterns that the new conversation parser should follow.
 
 ### Institutional Learnings
@@ -142,7 +142,6 @@ ft feed show <id>
 
 **Patterns to follow:**
 - `src/paths.ts`
-- `src/following-review-state.ts`
 - `src/account-export.ts`
 
 **Test scenarios:**
