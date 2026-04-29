@@ -40,6 +40,9 @@ ft bookmarks list --author @handle       # By author
 ft bookmarks list --after/--before DATE  # Date range (YYYY-MM-DD)
 ft bookmarks stats                       # Collection overview
 ft bookmarks viz                         # Terminal dashboard
+ft bookmarks classify status             # Classification coverage if sidecar exists
+ft bookmarks classify categories         # Semantic category/content-type/tag counts
+ft bookmarks classify list --tag TAG     # Browse classified bookmarks by generated tag
 ft likes stats                           # Likes overview
 ft likes viz                             # Likes terminal dashboard
 ft likes add <id>                        # Like a post and cache it locally
@@ -54,6 +57,8 @@ Combine filters: \`ft bookmarks list --author @handle --after 2026-01-01 --limit
 - Don't dump raw output — summarize and connect findings to the user's current work
 - Cross-reference multiple queries to build a complete picture
 - Look for recurring authors, topic clusters, and connections between bookmarks
+- Use \`ft bookmarks classify ...\` only when classification sidecar data exists or the user asks to create it.
+  Classification is a separate local sidecar workflow; do not imply normal sync performs LLM analysis.
 
 ## Account Research Workflow
 

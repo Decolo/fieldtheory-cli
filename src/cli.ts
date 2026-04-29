@@ -47,6 +47,11 @@ import {
   isFirstRun,
   isFeedFirstRun,
   isLikesFirstRun,
+  twitterBookmarkAnalysisMetaPath,
+  twitterBookmarkAnalysisPath,
+  twitterBookmarkCurationMetaPath,
+  twitterBookmarkCurationPath,
+  twitterBookmarkCurationProfilePath,
   twitterAccountTimelineIndexPath,
   twitterBookmarksIndexPath,
   twitterFeedIndexPath,
@@ -60,7 +65,32 @@ import { assertWebAssetsBuilt, startWebServer } from './web.js';
 import { trimLikes } from './likes-trim.js';
 import { trimBookmarks } from './bookmark-trim.js';
 import { trimFeed } from './feed-trim.js';
-import { loadEnv } from './config.js';
+import { loadEnv, loadBookmarkAnalysisProviderConfig } from './config.js';
+import { runBookmarkAnalysis, type BookmarkAnalysisProgress } from './bookmark-analysis.js';
+import { renderBookmarkAnalysisViz } from './bookmark-analysis-viz.js';
+import { runBookmarkCuration, type BookmarkCurationProgress } from './bookmark-curation.js';
+import { ensureBookmarkCurationProfile } from './bookmark-curation-profile.js';
+import {
+  getBookmarkAnalysisCategoryCounts,
+  getBookmarkAnalysisRecord,
+  getBookmarkAnalysisStatus,
+  listBookmarkAnalysisRecords,
+} from './bookmark-analysis-store.js';
+import {
+  normalizeBookmarkAnalysisTags,
+  normalizeBookmarkContentType,
+  normalizeBookmarkPrimaryCategory,
+} from './bookmark-analysis-types.js';
+import {
+  getBookmarkCurationRecord,
+  getBookmarkCurationStatus,
+  getBookmarkCurationSummary,
+  listBookmarkCurationRecords,
+} from './bookmark-curation-store.js';
+import {
+  normalizeBookmarkCurationDecision,
+  normalizeBookmarkCurationSignals,
+} from './bookmark-curation-types.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -194,6 +224,38 @@ function formatFeedSearchResults(results: Array<{
     .join('\n\n');
 }
 
+function formatAnalysisList(results: Awaited<ReturnType<typeof listBookmarkAnalysisRecords>>): string {
+  if (results.length === 0) return 'No classified bookmarks found.';
+
+  return results
+    .map((record, index) => {
+      const author = record.authorHandle ? `@${record.authorHandle}` : '@?';
+      const tags = record.tags.length ? `  #${record.tags.join(' #')}` : '';
+      return `${index + 1}. [${record.primaryCategory}/${record.contentType}] ${author}  confidence=${record.confidence.toFixed(2)}${tags}\n   ${record.summary}\n   ${record.url}`;
+    })
+    .join('\n\n');
+}
+
+function formatCurationList(results: Awaited<ReturnType<typeof listBookmarkCurationRecords>>): string {
+  if (results.length === 0) return 'No curated bookmarks found.';
+
+  return results
+    .map((record, index) => {
+      const author = record.authorHandle ? `@${record.authorHandle}` : '@?';
+      const signals = record.signals.length ? `  #${record.signals.join(' #')}` : '';
+      return `${index + 1}. [${record.decision}] value=${record.value}/5 freshness=${record.freshness} confidence=${record.confidence.toFixed(2)} ${author}${signals}\n   ${record.rationale}\n   ${record.url}`;
+    })
+    .join('\n\n');
+}
+
+function formatTopCounts(counts: Record<string, number>, limit = 20): string {
+  const entries = Object.entries(counts)
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, limit);
+  if (entries.length === 0) return '  none';
+  return entries.map(([name, count]) => `  ${name}: ${count}`).join('\n');
+}
+
 function warnIfEmpty(totalBookmarks: number): void {
   if (totalBookmarks > 0) return;
   console.log(`  \u26a0 No bookmarks were found. This usually means:`);
@@ -288,7 +350,7 @@ function showCachedUpdateNotice(): void {
     const local = getLocalVersion();
     const packageName = getPackageName();
     if (latest && compareVersions(latest, local) > 0) {
-      console.log(`\n  \u2728 Update available: ${local} \u2192 ${latest}  \u2014  npm update -g ${packageName}`);
+      console.error(`\n  \u2728 Update available: ${local} \u2192 ${latest}  \u2014  npm update -g ${packageName}`);
     }
   } catch { /* no cache yet, skip */ }
 }
@@ -964,6 +1026,298 @@ export function buildCli() {
       console.log(item.url);
       console.log(item.text);
       if (item.links.length) console.log(`links: ${item.links.join(', ')}`);
+    }));
+
+  // ── classify ────────────────────────────────────────────────────────────
+
+  const classify = bookmarks
+    .command('classify')
+    .description('Classify local bookmarks into semantic categories')
+    .option('--limit <n>', 'Max bookmarks to classify in this run', (v: string) => Number(v))
+    .option('--provider <provider>', 'Provider: mock or openai-compatible')
+    .option('--model <model>', 'Provider model name')
+    .option('--batch-size <n>', 'Bookmarks per model request', (v: string) => Number(v))
+    .option('--refresh', 'Reclassify bookmarks that already have sidecar records', false)
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      if (!requireIndex()) return;
+      const env = { ...process.env };
+      if (options.provider) env.FT_BOOKMARK_ANALYSIS_PROVIDER = String(options.provider);
+      if (options.model) env.FT_BOOKMARK_ANALYSIS_MODEL = String(options.model);
+      if (options.batchSize != null) env.FT_BOOKMARK_ANALYSIS_BATCH_SIZE = String(options.batchSize);
+      const config = loadBookmarkAnalysisProviderConfig(env);
+
+      let lastProgress: BookmarkAnalysisProgress = { completed: 0, total: 0, failed: 0, batchNumber: 0, batchTotal: 0 };
+      const spinner = createSpinner(() => {
+        const pct = lastProgress.total > 0 ? Math.round((lastProgress.completed / lastProgress.total) * 100) : 0;
+        return `Classifying bookmarks... ${lastProgress.completed}/${lastProgress.total} (${pct}%) | batch ${lastProgress.batchNumber}/${lastProgress.batchTotal}`;
+      });
+      const result = await runWithSpinner(spinner, () => runBookmarkAnalysis({
+        limit: options.limit != null ? Number(options.limit) : undefined,
+        refresh: Boolean(options.refresh),
+        config,
+        onProgress: (progress) => {
+          lastProgress = progress;
+          spinner.update();
+        },
+      }));
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log(`  Classified bookmarks: ${result.meta.analyzedCount}/${result.meta.sourceCount}`);
+      if (result.skippedCount > 0) console.log(`  Skipped existing: ${result.skippedCount}`);
+      if (result.meta.failedCount > 0) console.log(`  Failed: ${result.meta.failedCount}`);
+      console.log(`  Provider: ${result.meta.model.provider}`);
+      console.log(`  Model: ${result.meta.model.model}`);
+      console.log(`  Output: ${twitterBookmarkAnalysisPath()}`);
+      console.log(`  Meta: ${twitterBookmarkAnalysisMetaPath()}`);
+    }));
+
+  classify
+    .command('status')
+    .description('Show bookmark classification coverage and output paths')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const status = await getBookmarkAnalysisStatus();
+      if (options.json || classify.opts().json) {
+        console.log(JSON.stringify(status, null, 2));
+        return;
+      }
+
+      console.log(`Classified bookmarks: ${status.analyzedCount}/${status.sourceCount} (${Math.round(status.coverage * 100)}%)`);
+      if (status.meta) {
+        console.log(`Generated: ${status.meta.generatedAt}`);
+        console.log(`Provider: ${status.meta.model.provider}`);
+        console.log(`Model: ${status.meta.model.model}`);
+      }
+      console.log(`Analysis: ${status.analysisPath}`);
+      console.log(`Meta: ${status.metaPath}`);
+    }));
+
+  classify
+    .command('categories')
+    .description('Show category, content type, and tag counts')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const counts = await getBookmarkAnalysisCategoryCounts();
+      if (options.json || classify.opts().json) {
+        console.log(JSON.stringify(counts, null, 2));
+        return;
+      }
+
+      console.log('Primary categories');
+      console.log(formatTopCounts(counts.primaryCategories));
+      console.log('\nContent types');
+      console.log(formatTopCounts(counts.contentTypes));
+      console.log('\nTags');
+      console.log(formatTopCounts(counts.tags));
+    }));
+
+  classify
+    .command('list')
+    .description('List classified bookmarks with semantic filters')
+    .option('--category <category>', 'Filter by primary category')
+    .option('--content-type <type>', 'Filter by content type')
+    .option('--tag <tag>', 'Filter by tag')
+    .option('--limit <n>', 'Max results', (v: string) => Number(v), 30)
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const tag = normalizeBookmarkAnalysisTags(options.tag ? [String(options.tag)] : [], 1)[0];
+      const results = await listBookmarkAnalysisRecords({
+        primaryCategory: options.category ? normalizeBookmarkPrimaryCategory(String(options.category)) : undefined,
+        contentType: options.contentType ? normalizeBookmarkContentType(String(options.contentType)) : undefined,
+        tag,
+        limit: Number(options.limit) || 30,
+      });
+      if (options.json || classify.opts().json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+      console.log(formatAnalysisList(results));
+    }));
+
+  classify
+    .command('show')
+    .description('Show one bookmark classification')
+    .argument('<id>', 'Bookmark id or tweet id')
+    .option('--json', 'JSON output')
+    .action(safe(async (id: string, options) => {
+      const record = await getBookmarkAnalysisRecord(String(id));
+      if (!record) {
+        console.log(`  Classified bookmark not found: ${String(id)}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (options.json || classify.opts().json) {
+        console.log(JSON.stringify(record, null, 2));
+        return;
+      }
+      console.log(`${record.id} · ${record.authorHandle ? `@${record.authorHandle}` : '@?'}`);
+      console.log(`${record.primaryCategory}/${record.contentType} · confidence=${record.confidence.toFixed(2)}`);
+      if (record.tags.length) console.log(`tags: ${record.tags.join(', ')}`);
+      console.log(record.summary);
+      console.log(record.url);
+      if (record.rationale) console.log(`rationale: ${record.rationale}`);
+      if (record.evidence.length) console.log(`evidence: ${record.evidence.join(' | ')}`);
+    }));
+
+  classify
+    .command('viz')
+    .description('Terminal dashboard of bookmark classification patterns')
+    .option('--limit-tags <n>', 'Number of top tags to show', (v: string) => Number(v), 20)
+    .action(safe(async (options) => {
+      console.log(await renderBookmarkAnalysisViz({
+        limitTags: Number(options.limitTags) || 20,
+      }));
+    }));
+
+  // ── curate ──────────────────────────────────────────────────────────────
+
+  const curate = bookmarks
+    .command('curate')
+    .description('Score classified bookmarks for keep/review/remove decisions')
+    .option('--limit <n>', 'Max bookmarks to curate in this run', (v: string) => Number(v))
+    .option('--provider <provider>', 'Provider: mock or openai-compatible')
+    .option('--model <model>', 'Provider model name')
+    .option('--batch-size <n>', 'Bookmarks per model request', (v: string) => Number(v))
+    .option('--refresh', 'Re-curate bookmarks that already have sidecar records', false)
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      if (!requireIndex()) return;
+      const env = { ...process.env };
+      if (options.provider) env.FT_BOOKMARK_ANALYSIS_PROVIDER = String(options.provider);
+      if (options.model) env.FT_BOOKMARK_ANALYSIS_MODEL = String(options.model);
+      if (options.batchSize != null) env.FT_BOOKMARK_ANALYSIS_BATCH_SIZE = String(options.batchSize);
+      const config = loadBookmarkAnalysisProviderConfig(env);
+
+      let lastProgress: BookmarkCurationProgress = { completed: 0, total: 0, failed: 0, batchNumber: 0, batchTotal: 0 };
+      const spinner = createSpinner(() => {
+        const pct = lastProgress.total > 0 ? Math.round((lastProgress.completed / lastProgress.total) * 100) : 0;
+        return `Curating bookmarks... ${lastProgress.completed}/${lastProgress.total} (${pct}%) | batch ${lastProgress.batchNumber}/${lastProgress.batchTotal}`;
+      });
+      const result = await runWithSpinner(spinner, () => runBookmarkCuration({
+        limit: options.limit != null ? Number(options.limit) : undefined,
+        refresh: Boolean(options.refresh),
+        config,
+        onProgress: (progress) => {
+          lastProgress = progress;
+          spinner.update();
+        },
+      }));
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log(`  Curated bookmarks: ${result.meta.curatedCount}/${result.meta.sourceCount}`);
+      if (result.skippedCount > 0) console.log(`  Skipped existing: ${result.skippedCount}`);
+      if (result.meta.failedCount > 0) console.log(`  Failed: ${result.meta.failedCount}`);
+      console.log(`  Provider: ${result.meta.model.provider}`);
+      console.log(`  Model: ${result.meta.model.model}`);
+      console.log(`  Profile: ${result.profilePath}${result.usedDefaultProfile ? ' (default)' : ''}`);
+      console.log(`  Output: ${twitterBookmarkCurationPath()}`);
+      console.log(`  Meta: ${twitterBookmarkCurationMetaPath()}`);
+    }));
+
+  curate
+    .command('profile')
+    .description('Create the editable bookmark curation profile if missing')
+    .action(safe(async () => {
+      const profilePath = await ensureBookmarkCurationProfile();
+      console.log(`Profile: ${profilePath}`);
+    }));
+
+  curate
+    .command('status')
+    .description('Show bookmark curation coverage and output paths')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const status = await getBookmarkCurationStatus();
+      if (options.json || curate.opts().json) {
+        console.log(JSON.stringify(status, null, 2));
+        return;
+      }
+      console.log(`Curated bookmarks: ${status.curatedCount}/${status.sourceCount} (${Math.round(status.coverage * 100)}%)`);
+      if (status.meta) {
+        console.log(`Generated: ${status.meta.generatedAt}`);
+        console.log(`Provider: ${status.meta.model.provider}`);
+        console.log(`Model: ${status.meta.model.model}`);
+        console.log(`Profile: ${status.meta.profilePath}`);
+      } else {
+        console.log(`Profile: ${twitterBookmarkCurationProfilePath()}`);
+      }
+      console.log(`Curation: ${status.curationPath}`);
+      console.log(`Meta: ${status.metaPath}`);
+    }));
+
+  curate
+    .command('summary')
+    .description('Show keep/review/remove summary')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const summary = await getBookmarkCurationSummary();
+      if (options.json || curate.opts().json) {
+        console.log(JSON.stringify(summary, null, 2));
+        return;
+      }
+      console.log('Decisions');
+      console.log(formatTopCounts(summary.decisions));
+      console.log(`\nAverage value: ${summary.averageValue.toFixed(2)}/5`);
+      console.log(`Low confidence: ${summary.lowConfidenceCount}`);
+      console.log('\nFreshness');
+      console.log(formatTopCounts(summary.freshness));
+      console.log('\nSignals');
+      console.log(formatTopCounts(summary.signals));
+    }));
+
+  curate
+    .command('list')
+    .description('List curated bookmarks with decision filters')
+    .option('--decision <decision>', 'Filter by keep, review, or remove')
+    .option('--signal <signal>', 'Filter by generated signal')
+    .option('--limit <n>', 'Max results', (v: string) => Number(v), 30)
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const decision = options.decision ? normalizeBookmarkCurationDecision(String(options.decision)) : undefined;
+      const signal = normalizeBookmarkCurationSignals(options.signal ? [String(options.signal)] : [], 1)[0];
+      const results = await listBookmarkCurationRecords({
+        decision,
+        signal,
+        limit: Number(options.limit) || 30,
+      });
+      if (options.json || curate.opts().json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+      console.log(formatCurationList(results));
+    }));
+
+  curate
+    .command('show')
+    .description('Show one bookmark curation record')
+    .argument('<id>', 'Bookmark id or tweet id')
+    .option('--json', 'JSON output')
+    .action(safe(async (id: string, options) => {
+      const record = await getBookmarkCurationRecord(String(id));
+      if (!record) {
+        console.log(`  Curated bookmark not found: ${String(id)}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (options.json || curate.opts().json) {
+        console.log(JSON.stringify(record, null, 2));
+        return;
+      }
+      console.log(`${record.id} · ${record.authorHandle ? `@${record.authorHandle}` : '@?'}`);
+      console.log(`${record.decision} · value=${record.value}/5 · freshness=${record.freshness} · confidence=${record.confidence.toFixed(2)}`);
+      if (record.signals.length) console.log(`signals: ${record.signals.join(', ')}`);
+      console.log(record.rationale);
+      console.log(record.url);
+      if (record.evidence.length) console.log(`evidence: ${record.evidence.join(' | ')}`);
     }));
 
   bookmarks

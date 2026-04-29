@@ -72,6 +72,7 @@ test('bookmarks help exposes the real bookmark namespace', () => {
   assert.match(help, /search/);
   assert.match(help, /list/);
   assert.match(help, /show/);
+  assert.match(help, /classify/);
   assert.match(help, /index/);
   assert.match(help, /repair/);
   assert.doesNotMatch(help, /alias/i);
@@ -147,5 +148,79 @@ test('ft bookmarks export --out writes canonical JSON to a file', async () => {
     const payload = JSON.parse(await readFile(outputPath, 'utf8'));
     assert.equal(payload.resource, 'bookmarks');
     assert.equal(payload.items.length, 1);
+  });
+});
+
+test('ft bookmarks classify writes sidecar analysis and exposes list filters', async () => {
+  await withIndexedBookmarkDataDir(async (dir) => {
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const env = {
+      ...process.env,
+      FT_DATA_DIR: dir,
+      FT_BOOKMARK_ANALYSIS_PROVIDER: 'mock',
+    };
+    const classify = await execFileAsync(tsx, ['src/cli.ts', 'bookmarks', 'classify', '--json'], {
+      cwd: process.cwd(),
+      env,
+    });
+
+    const payload = JSON.parse(classify.stdout);
+    assert.equal(payload.meta.sourceCount, 1);
+    assert.equal(payload.meta.analyzedCount, 1);
+    assert.equal(payload.records[0].contentType, 'repo');
+
+    const list = await execFileAsync(tsx, ['src/cli.ts', 'bookmarks', 'classify', 'list', '--content-type', 'repo', '--json'], {
+      cwd: process.cwd(),
+      env,
+    });
+    const rows = JSON.parse(list.stdout);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].tweetId, '1');
+
+    const categories = await execFileAsync(tsx, ['src/cli.ts', 'bookmarks', 'classify', 'categories'], {
+      cwd: process.cwd(),
+      env,
+    });
+    assert.match(categories.stdout, /Content types/);
+    assert.match(categories.stdout, /repo: 1/);
+  });
+});
+
+test('ft bookmarks curate writes sidecar recommendations from classified bookmarks', async () => {
+  await withIndexedBookmarkDataDir(async (dir) => {
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const env = {
+      ...process.env,
+      FT_DATA_DIR: dir,
+      FT_BOOKMARK_ANALYSIS_PROVIDER: 'mock',
+    };
+    await execFileAsync(tsx, ['src/cli.ts', 'bookmarks', 'classify', '--json'], {
+      cwd: process.cwd(),
+      env,
+    });
+
+    const curate = await execFileAsync(tsx, ['src/cli.ts', 'bookmarks', 'curate', '--json'], {
+      cwd: process.cwd(),
+      env,
+    });
+    const payload = JSON.parse(curate.stdout);
+    assert.equal(payload.meta.sourceCount, 1);
+    assert.equal(payload.meta.curatedCount, 1);
+    assert.equal(payload.records[0].decision, 'keep');
+
+    const list = await execFileAsync(tsx, ['src/cli.ts', 'bookmarks', 'curate', 'list', '--decision', 'keep', '--json'], {
+      cwd: process.cwd(),
+      env,
+    });
+    const rows = JSON.parse(list.stdout);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].tweetId, '1');
+
+    const summary = await execFileAsync(tsx, ['src/cli.ts', 'bookmarks', 'curate', 'summary'], {
+      cwd: process.cwd(),
+      env,
+    });
+    assert.match(summary.stdout, /Decisions/);
+    assert.match(summary.stdout, /keep: 1/);
   });
 });

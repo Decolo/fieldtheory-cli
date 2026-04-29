@@ -6,6 +6,20 @@ export type {
   ArchiveSourceAttachments,
   ArchiveSourceKind,
 } from './archive-core.js';
+export type {
+  BookmarkAnalysisMeta,
+  BookmarkAnalysisModelInfo,
+  BookmarkAnalysisProvider,
+  BookmarkAnalysisRecord,
+  BookmarkContentType,
+  BookmarkPrimaryCategory,
+} from './bookmark-analysis-types.js';
+export type {
+  BookmarkCurationDecision,
+  BookmarkCurationFreshness,
+  BookmarkCurationMeta,
+  BookmarkCurationRecord,
+} from './bookmark-curation-types.js';
 
 export interface BookmarkMediaVariant {
   url?: string;
