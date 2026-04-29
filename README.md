@@ -43,15 +43,20 @@ ft likes search "distributed systems"
 ft search-all "best practices on claude code"
 ft search-all "claude code" --mode action
 
-# 7. Trim older archives in controlled batches
+# 7. Classify bookmarks into local semantic sidecar metadata
+ft bookmarks classify
+ft bookmarks classify list --content-type repo
+ft bookmarks classify list --tag agent-memory
+
+# 8. Trim older archives in controlled batches
 ft likes trim --keep 200 --batch-size 25 --pause-seconds 45
 ft bookmarks trim --keep 500 --batch-size 25 --pause-seconds 45
 ft feed trim --keep 5000
 
-# 8. Start the recurring feed collection daemon
+# 9. Start the recurring feed collection daemon
 ft feed daemon start --every 30m --max-pages 2
 
-# 9. Explore archives
+# 10. Explore archives
 ft bookmarks viz
 ft likes viz
 ft web
@@ -68,7 +73,7 @@ On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse you
 | Command | Description |
 |---------|-------------|
 | `ft bookmarks sync` | Download and sync bookmarks from the primary browser-session path |
-| `ft bookmarks sync --rebuild` | Full history re-crawl of bookmarks |
+| `ft bookmarks sync --rebuild` | Full bookmark-history re-crawl; use when local bookmarks may be incomplete |
 | `ft bookmarks repair` | Repair missing quoted tweets, truncated text, and invalid bookmark dates |
 | `ft likes sync` | Download and sync liked posts into a separate local archive |
 | `ft likes repair` | Repair missing quoted tweets and truncated text in liked posts |
@@ -87,6 +92,12 @@ On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse you
 | `ft search-all <query>` | Hybrid search across feed, likes, and bookmarks |
 | `ft bookmarks list` | Filter by author and date |
 | `ft bookmarks show <id>` | Show one bookmark in detail |
+| `ft bookmarks classify` | Classify local bookmarks into `bookmark-analysis.jsonl` sidecar metadata |
+| `ft bookmarks classify status` | Show bookmark classification coverage and output paths |
+| `ft bookmarks classify categories` | Count primary categories, content types, and generated tags |
+| `ft bookmarks classify viz` | Static terminal overview of category, content type, and tag patterns |
+| `ft bookmarks classify list` | Browse classified bookmarks; filter by `--category`, `--content-type`, or `--tag` |
+| `ft bookmarks classify show <id>` | Show one bookmark classification record |
 | `ft bookmarks add <id>` | Create one bookmark on X |
 | `ft bookmarks unbookmark <id>` | Remove a bookmark on X and update the local bookmark archive |
 | `ft bookmarks trim` | Keep only the latest bookmarks and unbookmark older posts on X in throttled batches |
@@ -168,6 +179,69 @@ ft feed daemon start --every 30m --max-pages 2
 
 `ft accounts export` stays local-first. It reads one tracked account's existing local archive, filters by `--after` / `--before` in `YYYY-MM-DD` format, and emits JSON for downstream agent or research workflows. It does not perform sync or LLM analysis itself.
 
+## Bookmark Classification
+
+`ft bookmarks classify` reads your local bookmark archive and writes semantic metadata into separate sidecar files. It does not mutate `bookmarks.jsonl`, does not call X, and does not require browser cookies.
+
+By default it uses the local `mock` provider. The mock path is deterministic and cheap: it uses text, links, domains, and rule hints to produce usable placeholder categories without network access. To use a small remote model, opt in explicitly:
+
+```bash
+export FT_BOOKMARK_ANALYSIS_PROVIDER=openai-compatible
+export FT_BOOKMARK_ANALYSIS_API_KEY=...
+export FT_BOOKMARK_ANALYSIS_MODEL=gpt-4o-mini
+# optional, defaults to https://api.openai.com/v1
+export FT_BOOKMARK_ANALYSIS_BASE_URL=https://api.openai.com/v1
+
+ft bookmarks classify --batch-size 20
+```
+
+The classifier stores:
+
+- `primaryCategory`: controlled vocabulary such as `ai`, `software-engineering`, `research`, `product-design`, or `other`
+- `contentType`: controlled vocabulary such as `repo`, `paper`, `article`, `thread`, `tool`, `demo`, or `other`
+- `subcategory` and `tags`: flexible model-generated labels, normalized for browsing
+- `summary`, `confidence`, `rationale`, and short `evidence`
+
+Browse results with:
+
+```bash
+ft bookmarks classify status
+ft bookmarks classify categories
+ft bookmarks classify viz
+ft bookmarks classify list --content-type repo
+ft bookmarks classify list --category ai
+ft bookmarks classify list --tag agent-memory
+ft bookmarks classify show <tweet-id>
+```
+
+## Bookmark Curation
+
+`ft bookmarks curate` reads your existing bookmark classification sidecar, applies a local curation profile, and writes keep/review/remove recommendations into separate sidecar files. It does not mutate `bookmarks.jsonl` and does not remove bookmarks from X.
+
+Create or edit the profile at `~/.ft-bookmarks/curation-profile.md`:
+
+```bash
+ft bookmarks curate profile
+```
+
+The default profile favors durable AI practices: concrete implementation notes, production lessons, code, architecture, evaluation, agent memory, coding agents, AI infrastructure, CLI/devtooling, and reusable workflows. It penalizes marketing-heavy AI announcements, shallow launch posts, stale release news, and low-information opinions.
+
+Run curation with the same provider settings used by classification:
+
+```bash
+ft bookmarks curate
+ft bookmarks curate summary
+ft bookmarks curate list --decision remove
+ft bookmarks curate list --decision review
+ft bookmarks curate show <tweet-id>
+```
+
+Existing curation records are skipped by default. Use `--refresh` to re-read and re-score everything after changing your profile:
+
+```bash
+ft bookmarks curate --refresh
+```
+
 ## Data
 
 All data is stored locally at `~/.ft-bookmarks/`:
@@ -178,10 +252,19 @@ All data is stored locally at `~/.ft-bookmarks/`:
   bookmarks.db            # SQLite FTS5 search index
   bookmarks-meta.json     # sync metadata
   bookmarks-backfill-state.json
+  bookmark-analysis.jsonl # semantic bookmark classification sidecar
+  bookmark-analysis-meta.json
+  bookmark-curation.jsonl # keep/review/remove recommendation sidecar
+  bookmark-curation-meta.json
+  curation-profile.md     # editable personal curation preference profile
+  media/                  # downloaded bookmark media assets
+  media-manifest.json     # bookmark media download manifest
   likes.jsonl             # raw likes archive cache (one per line)
   likes.db                # SQLite FTS5 search index for likes
   likes-meta.json         # likes sync metadata
   likes-backfill-state.json
+  likes-media/            # downloaded liked-post media assets
+  likes-media-manifest.json
   accounts-registry.json   # local handle -> user-id registry for tracked accounts
   accounts/
     44196397/
@@ -193,6 +276,7 @@ All data is stored locally at `~/.ft-bookmarks/`:
   feed.db                 # SQLite index for local feed browsing
   feed-meta.json          # feed sync metadata
   feed-state.json
+  feed-context/           # cached replies/comments for selected feed items
   archive.jsonl           # canonical unified archive cache with source attachments
   archive.db              # unified archive index for web/search/assistant consumers
   feed-daemon-state.json  # recurring daemon status and last tick summary
@@ -214,7 +298,7 @@ Likes are intentionally a separate archive in v1. Feed items are also a separate
 Single-item remote cleanup is also supported:
 
 ```bash
-ft unbookmark <tweet-id>
+ft bookmarks unbookmark <tweet-id>
 ft likes unlike <tweet-id>
 ```
 
@@ -229,6 +313,14 @@ ft feed trim --keep 5000
 ```
 
 The likes and bookmarks trim commands recompute their trim set from the current local archive on each run, so they are safe to resume after an interruption. They unlike/unbookmark older posts on X in batches, rewrite the matching JSONL/meta files, and rebuild the matching SQLite index once per batch. `ft feed trim` is local-only: it removes older cached Home timeline items, prunes matching feed context bundles, updates `feed-meta.json`, and rebuilds `feed.db`.
+
+## Bookmark rebuild
+
+Normal bookmark sync is incremental: it stops when it reaches the newest bookmark already present in your local archive. Use `ft bookmarks sync --rebuild` when you want to scan your full X bookmark history again, for example after an interrupted first import, after parser/enrichment improvements, or when you suspect old bookmarks are missing locally.
+
+Rebuild does not delete your archive. It re-crawls bookmark pages from X, merges records by tweet id, refreshes `bookmarks.jsonl`, rebuilds `bookmarks.db`, and refreshes the unified `archive.jsonl` / `archive.db`.
+
+Likes do not currently have a separate `--rebuild` flag. `ft likes sync` already pages through the likes timeline until it reaches the configured page/runtime limits, the end of likes, or a stale/no-new page condition, then merges what it found into the local likes archive. If you need a deeper likes pass today, raise `--max-pages` / `--max-minutes` and run `ft likes repair` afterward for missing quoted tweets or truncated text.
 
 ## Feed collection daemon
 
@@ -283,11 +375,12 @@ tsx src/cli.ts web
 
 The web UI is local-only by default and binds to `127.0.0.1`. It serves the built frontend assets, so run `npm run build` at least once before starting `ft web`.
 
-The default web view is now search-first:
+The web UI opens on a dashboard, with search and source-specific archive tabs available from the toolbar:
 
 - search across feed, likes, and bookmarks in one result list
 - switch between `topic` and `action` ranking
 - keep bookmarks/likes archive browsing available as separate tabs
+- inspect feed collection and action metrics on the dashboard
 - keep the list pane and detail pane independently scrollable on desktop
 
 ## Platform support

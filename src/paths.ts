@@ -52,6 +52,26 @@ export function twitterBookmarksIndexPath(): string {
   return path.join(dataDir(), 'bookmarks.db');
 }
 
+export function twitterBookmarkAnalysisPath(): string {
+  return path.join(dataDir(), 'bookmark-analysis.jsonl');
+}
+
+export function twitterBookmarkAnalysisMetaPath(): string {
+  return path.join(dataDir(), 'bookmark-analysis-meta.json');
+}
+
+export function twitterBookmarkCurationPath(): string {
+  return path.join(dataDir(), 'bookmark-curation.jsonl');
+}
+
+export function twitterBookmarkCurationMetaPath(): string {
+  return path.join(dataDir(), 'bookmark-curation-meta.json');
+}
+
+export function twitterBookmarkCurationProfilePath(): string {
+  return path.join(dataDir(), 'curation-profile.md');
+}
+
 export function twitterLikesCachePath(): string {
   return path.join(dataDir(), 'likes.jsonl');
 }

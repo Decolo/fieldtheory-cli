@@ -11,6 +11,14 @@ export interface ChromeSessionConfig {
   browser: BrowserDef;
 }
 
+export interface BookmarkAnalysisProviderConfig {
+  provider: 'mock' | 'openai-compatible';
+  model: string;
+  baseUrl?: string;
+  apiKey?: string;
+  batchSize: number;
+}
+
 export function loadEnv(): void {
   const dir = dataDir();
   const candidatePaths = [
@@ -46,4 +54,37 @@ export function loadChromeSessionConfig(overrides: { browserId?: string } = {}):
   const profileDirectory = process.env.FT_CHROME_PROFILE_DIRECTORY ?? 'Default';
 
   return { chromeUserDataDir: dir, chromeProfileDirectory: profileDirectory, browser };
+}
+
+export function loadBookmarkAnalysisProviderConfig(env: NodeJS.ProcessEnv = process.env): BookmarkAnalysisProviderConfig {
+  loadEnv();
+  const mergedEnv = env === process.env ? process.env : { ...process.env, ...env };
+  const providerRaw = mergedEnv.FT_BOOKMARK_ANALYSIS_PROVIDER?.trim() || 'mock';
+  if (providerRaw !== 'mock' && providerRaw !== 'openai-compatible') {
+    throw new Error(`Unsupported bookmark analysis provider: "${providerRaw}". Use "mock" or "openai-compatible".`);
+  }
+
+  const provider = providerRaw;
+  const batchSize = Math.max(1, Number(mergedEnv.FT_BOOKMARK_ANALYSIS_BATCH_SIZE ?? 20) || 20);
+
+  if (provider === 'mock') {
+    return {
+      provider,
+      model: mergedEnv.FT_BOOKMARK_ANALYSIS_MODEL?.trim() || 'mock-classifier',
+      batchSize,
+    };
+  }
+
+  const apiKey = mergedEnv.FT_BOOKMARK_ANALYSIS_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error('Missing bookmark analysis API key. Set FT_BOOKMARK_ANALYSIS_API_KEY or use FT_BOOKMARK_ANALYSIS_PROVIDER=mock.');
+  }
+
+  return {
+    provider,
+    model: mergedEnv.FT_BOOKMARK_ANALYSIS_MODEL?.trim() || 'gpt-4o-mini',
+    baseUrl: (mergedEnv.FT_BOOKMARK_ANALYSIS_BASE_URL?.trim() || 'https://api.openai.com/v1').replace(/\/+$/, ''),
+    apiKey,
+    batchSize,
+  };
 }
