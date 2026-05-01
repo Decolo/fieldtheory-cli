@@ -20,6 +20,20 @@ export type {
   BookmarkCurationMeta,
   BookmarkCurationRecord,
 } from './bookmark-curation-types.js';
+export type {
+  LikeAnalysisMeta,
+  LikeAnalysisModelInfo,
+  LikeAnalysisProvider,
+  LikeAnalysisRecord,
+  LikeContentType,
+  LikePrimaryCategory,
+} from './like-analysis-types.js';
+export type {
+  LikeCurationDecision,
+  LikeCurationFreshness,
+  LikeCurationMeta,
+  LikeCurationRecord,
+} from './like-curation-types.js';
 
 export interface BookmarkMediaVariant {
   url?: string;

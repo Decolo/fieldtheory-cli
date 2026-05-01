@@ -19,6 +19,8 @@ export interface BookmarkAnalysisProviderConfig {
   batchSize: number;
 }
 
+export type LikeAnalysisProviderConfig = BookmarkAnalysisProviderConfig;
+
 export function loadEnv(): void {
   const dir = dataDir();
   const candidatePaths = [
@@ -87,4 +89,8 @@ export function loadBookmarkAnalysisProviderConfig(env: NodeJS.ProcessEnv = proc
     apiKey,
     batchSize,
   };
+}
+
+export function loadLikeAnalysisProviderConfig(env: NodeJS.ProcessEnv = process.env): LikeAnalysisProviderConfig {
+  return loadBookmarkAnalysisProviderConfig(env);
 }

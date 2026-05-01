@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compareVersions, runWithSpinner } from '../src/cli.js';
+import { compareVersions, extractTweetId, runWithSpinner } from '../src/cli.js';
 
 test('compareVersions: equal versions return 0', () => {
   assert.equal(compareVersions('1.2.3', '1.2.3'), 0);
@@ -52,4 +52,26 @@ test('runWithSpinner: stops spinner after error', async () => {
   );
 
   assert.equal(stopped, 1);
+});
+
+test('extractTweetId: accepts raw numeric ids', () => {
+  assert.equal(extractTweetId('2049847048690938030'), '2049847048690938030');
+});
+
+test('extractTweetId: extracts ids from X status URLs', () => {
+  assert.equal(
+    extractTweetId('https://x.com/jukan05/status/2049847048690938030?s=20'),
+    '2049847048690938030',
+  );
+});
+
+test('extractTweetId: extracts ids from Twitter status URLs', () => {
+  assert.equal(
+    extractTweetId('https://twitter.com/jukan05/statuses/2049847048690938030'),
+    '2049847048690938030',
+  );
+});
+
+test('extractTweetId: rejects invalid inputs', () => {
+  assert.throws(() => extractTweetId('https://x.com/jukan05'), /Invalid tweet id or URL/);
 });
