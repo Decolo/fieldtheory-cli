@@ -132,3 +132,79 @@ test('ft likes export prints canonical archive JSON', async () => {
     assert.equal(payload.items[0].sourceDetails.likedAt, '2026-03-05T12:00:00Z');
   });
 });
+
+test('ft likes classify writes sidecar analysis and exposes list filters', async () => {
+  await withLikesDataDir(async (dir) => {
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const env = {
+      ...process.env,
+      FT_DATA_DIR: dir,
+      FT_BOOKMARK_ANALYSIS_PROVIDER: 'mock',
+    };
+    const classify = await execFileAsync(tsx, ['src/cli.ts', 'likes', 'classify', '--json'], {
+      cwd: process.cwd(),
+      env,
+    });
+
+    const payload = JSON.parse(classify.stdout);
+    assert.equal(payload.meta.source, 'likes');
+    assert.equal(payload.meta.sourceCount, 1);
+    assert.equal(payload.meta.analyzedCount, 1);
+    assert.equal(payload.records[0].contentType, 'article');
+
+    const list = await execFileAsync(tsx, ['src/cli.ts', 'likes', 'classify', 'list', '--content-type', 'article', '--json'], {
+      cwd: process.cwd(),
+      env,
+    });
+    const rows = JSON.parse(list.stdout);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].tweetId, '1');
+
+    const categories = await execFileAsync(tsx, ['src/cli.ts', 'likes', 'classify', 'categories'], {
+      cwd: process.cwd(),
+      env,
+    });
+    assert.match(categories.stdout, /Content types/);
+    assert.match(categories.stdout, /article: 1/);
+  });
+});
+
+test('ft likes curate writes sidecar recommendations from classified likes', async () => {
+  await withLikesDataDir(async (dir) => {
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const env = {
+      ...process.env,
+      FT_DATA_DIR: dir,
+      FT_BOOKMARK_ANALYSIS_PROVIDER: 'mock',
+    };
+    await execFileAsync(tsx, ['src/cli.ts', 'likes', 'classify', '--json'], {
+      cwd: process.cwd(),
+      env,
+    });
+
+    const curate = await execFileAsync(tsx, ['src/cli.ts', 'likes', 'curate', '--json'], {
+      cwd: process.cwd(),
+      env,
+    });
+    const payload = JSON.parse(curate.stdout);
+    assert.equal(payload.meta.source, 'likes');
+    assert.equal(payload.meta.sourceCount, 1);
+    assert.equal(payload.meta.curatedCount, 1);
+    assert.equal(payload.records[0].decision, 'keep');
+
+    const list = await execFileAsync(tsx, ['src/cli.ts', 'likes', 'curate', 'list', '--decision', 'keep', '--json'], {
+      cwd: process.cwd(),
+      env,
+    });
+    const rows = JSON.parse(list.stdout);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].tweetId, '1');
+
+    const summary = await execFileAsync(tsx, ['src/cli.ts', 'likes', 'curate', 'summary'], {
+      cwd: process.cwd(),
+      env,
+    });
+    assert.match(summary.stdout, /Decisions/);
+    assert.match(summary.stdout, /keep: 1/);
+  });
+});

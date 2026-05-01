@@ -90,6 +90,7 @@ On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse you
 |---------|-------------|
 | `ft bookmarks search <query>` | Full-text bookmark search with BM25 ranking |
 | `ft search-all <query>` | Hybrid search across feed, likes, and bookmarks |
+| `ft tweet show <url-or-id>` | Fetch one public X/Twitter post directly by URL or tweet id |
 | `ft bookmarks list` | Filter by author and date |
 | `ft bookmarks show <id>` | Show one bookmark in detail |
 | `ft bookmarks classify` | Classify local bookmarks into `bookmark-analysis.jsonl` sidecar metadata |
@@ -104,6 +105,13 @@ On first run, `ft bookmarks sync`, `ft likes sync`, and `ft feed sync` reuse you
 | `ft likes search <query>` | Full-text search across liked posts |
 | `ft likes list` | Filter liked posts by query, author, and like date |
 | `ft likes show <id>` | Show one liked post in detail |
+| `ft likes classify` | Classify local likes into `like-analysis.jsonl` sidecar metadata |
+| `ft likes classify status` | Show like classification coverage and output paths |
+| `ft likes classify categories` | Count like primary categories, content types, and generated tags |
+| `ft likes classify viz` | Static terminal overview of like category, content type, and tag patterns |
+| `ft likes classify list` | Browse classified likes; filter by `--category`, `--content-type`, or `--tag` |
+| `ft likes classify show <id>` | Show one like classification record |
+| `ft likes curate` | Score classified likes into keep/review/remove recommendations |
 | `ft likes add <id>` | Like a post on X and update the local likes archive |
 | `ft likes unlike <id>` | Unlike a post on X and update the local likes archive |
 | `ft likes trim` | Keep only the latest likes and unlike older posts on X in throttled batches |
@@ -242,6 +250,28 @@ Existing curation records are skipped by default. Use `--refresh` to re-read and
 ft bookmarks curate --refresh
 ```
 
+## Like Classification And Curation
+
+Likes support the same semantic sidecar workflow as bookmarks. `ft likes classify` reads the local likes archive and writes `like-analysis.jsonl` plus `like-analysis-meta.json`; `ft likes curate` reads that classification sidecar and writes `like-curation.jsonl` plus `like-curation-meta.json`.
+
+These commands are local sidecar workflows: they do not mutate `likes.jsonl`, do not call X, and do not unlike anything. They use the same provider configuration as bookmark analysis:
+
+```bash
+ft likes classify
+ft likes classify categories
+ft likes classify viz
+ft likes classify list --content-type article
+ft likes classify list --tag agent-memory
+
+ft likes curate profile
+ft likes curate
+ft likes curate summary
+ft likes curate list --decision remove
+ft likes curate --refresh
+```
+
+The editable likes curation profile lives at `~/.ft-bookmarks/like-curation-profile.md`.
+
 ## Data
 
 All data is stored locally at `~/.ft-bookmarks/`:
@@ -263,6 +293,11 @@ All data is stored locally at `~/.ft-bookmarks/`:
   likes.db                # SQLite FTS5 search index for likes
   likes-meta.json         # likes sync metadata
   likes-backfill-state.json
+  like-analysis.jsonl     # semantic like classification sidecar
+  like-analysis-meta.json
+  like-curation.jsonl     # keep/review/remove recommendation sidecar for likes
+  like-curation-meta.json
+  like-curation-profile.md
   likes-media/            # downloaded liked-post media assets
   likes-media-manifest.json
   accounts-registry.json   # local handle -> user-id registry for tracked accounts

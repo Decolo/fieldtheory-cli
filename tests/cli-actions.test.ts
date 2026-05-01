@@ -68,16 +68,17 @@ async function startMockXServer(options: { unlikeStatus?: number; unbookmarkStat
     if (req.url?.startsWith('/tweet-result')) {
       const url = new URL(req.url, 'http://127.0.0.1');
       const id = url.searchParams.get('id');
-      assert.ok(id === 'b1' || id === 'l1');
+      assert.ok(id === 'b1' || id === 'l1' || id === '1234567890');
       const isLike = id === 'l1';
+      const isDirectTweet = id === '1234567890';
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
         id_str: id,
-        text: isLike ? 'Saved like' : 'Saved bookmark',
+        text: isDirectTweet ? 'Direct tweet content' : isLike ? 'Saved like' : 'Saved bookmark',
         created_at: '2026-03-01T00:00:00Z',
         user: {
-          screen_name: isLike ? 'bob' : 'alice',
-          name: isLike ? 'Bob' : 'Alice',
+          screen_name: isDirectTweet ? 'direct' : isLike ? 'bob' : 'alice',
+          name: isDirectTweet ? 'Direct User' : isLike ? 'Bob' : 'Alice',
           profile_image_url_https: isLike ? 'https://img.example.com/bob.jpg' : 'https://img.example.com/alice.jpg',
         },
         mediaDetails: [],
@@ -258,6 +259,36 @@ test('ft likes add likes the item remotely and refreshes the local archive', asy
       assert.ok(await getLikeById('l1'));
       const likesCache = await readFile(path.join(dir, 'likes.jsonl'), 'utf8');
       assert.match(likesCache, /Saved like/);
+    } finally {
+      await mockX.close();
+    }
+  });
+});
+
+test('ft tweet show fetches one public tweet directly by URL', async () => {
+  await withCliDataDir(async (dir) => {
+    const mockX = await startMockXServer();
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+
+    try {
+      const { stdout } = await execFileAsync(tsx, [
+        'src/cli.ts',
+        'tweet',
+        'show',
+        'https://x.com/direct/status/1234567890?s=20',
+      ], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          FT_DATA_DIR: dir,
+          FT_X_SYNDICATION_URL: `${mockX.origin}/tweet-result`,
+        },
+      });
+
+      assert.match(stdout, /1234567890  @direct  2026-03-01T00:00:00Z/);
+      assert.match(stdout, /Direct User/);
+      assert.match(stdout, /Direct tweet content/);
+      assert.match(stdout, /https:\/\/x.com\/direct\/status\/1234567890/);
     } finally {
       await mockX.close();
     }

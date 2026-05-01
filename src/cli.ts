@@ -10,7 +10,12 @@ import { syncFeedGraphQL, type FeedSyncProgress } from './graphql-feed.js';
 import { syncAccountTimelineGraphQL } from './graphql-account-timeline.js';
 import { syncFeedConversationContext } from './feed-context.js';
 import { bookmarkTweet, likeTweet, unlikeTweet, unbookmarkTweet } from './graphql-actions.js';
-import { fetchBookmarkRecordViaSyndication, type SyncProgress, type GapFillProgress } from './graphql-bookmarks.js';
+import {
+  fetchBookmarkRecordViaSyndication,
+  fetchTweetViaSyndication,
+  type SyncProgress,
+  type GapFillProgress,
+} from './graphql-bookmarks.js';
 import { syncBookmarks } from './bookmark-sync.js';
 import { repairBookmarks } from './bookmark-repair.js';
 import { repairLikes } from './like-repair.js';
@@ -52,6 +57,11 @@ import {
   twitterBookmarkCurationMetaPath,
   twitterBookmarkCurationPath,
   twitterBookmarkCurationProfilePath,
+  twitterLikeAnalysisMetaPath,
+  twitterLikeAnalysisPath,
+  twitterLikeCurationMetaPath,
+  twitterLikeCurationPath,
+  twitterLikeCurationProfilePath,
   twitterAccountTimelineIndexPath,
   twitterBookmarksIndexPath,
   twitterFeedIndexPath,
@@ -65,11 +75,15 @@ import { assertWebAssetsBuilt, startWebServer } from './web.js';
 import { trimLikes } from './likes-trim.js';
 import { trimBookmarks } from './bookmark-trim.js';
 import { trimFeed } from './feed-trim.js';
-import { loadEnv, loadBookmarkAnalysisProviderConfig } from './config.js';
+import { loadEnv, loadBookmarkAnalysisProviderConfig, loadLikeAnalysisProviderConfig } from './config.js';
 import { runBookmarkAnalysis, type BookmarkAnalysisProgress } from './bookmark-analysis.js';
 import { renderBookmarkAnalysisViz } from './bookmark-analysis-viz.js';
 import { runBookmarkCuration, type BookmarkCurationProgress } from './bookmark-curation.js';
 import { ensureBookmarkCurationProfile } from './bookmark-curation-profile.js';
+import { runLikeAnalysis, type LikeAnalysisProgress } from './like-analysis.js';
+import { renderLikeAnalysisViz } from './like-analysis-viz.js';
+import { runLikeCuration, type LikeCurationProgress } from './like-curation.js';
+import { ensureLikeCurationProfile } from './like-curation-profile.js';
 import {
   getBookmarkAnalysisCategoryCounts,
   getBookmarkAnalysisRecord,
@@ -91,6 +105,27 @@ import {
   normalizeBookmarkCurationDecision,
   normalizeBookmarkCurationSignals,
 } from './bookmark-curation-types.js';
+import {
+  getLikeAnalysisCategoryCounts,
+  getLikeAnalysisRecord,
+  getLikeAnalysisStatus,
+  listLikeAnalysisRecords,
+} from './like-analysis-store.js';
+import {
+  normalizeLikeAnalysisTags,
+  normalizeLikeContentType,
+  normalizeLikePrimaryCategory,
+} from './like-analysis-types.js';
+import {
+  getLikeCurationRecord,
+  getLikeCurationStatus,
+  getLikeCurationSummary,
+  listLikeCurationRecords,
+} from './like-curation-store.js';
+import {
+  normalizeLikeCurationDecision,
+  normalizeLikeCurationSignals,
+} from './like-curation-types.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -191,6 +226,31 @@ function writeLikeRepairFailureLog(
   return writeRepairFailureLog(LIKE_REPAIR_FAILURE_LOG, failures);
 }
 
+export function extractTweetId(input: string): string {
+  const trimmed = input.trim();
+  if (/^\d+$/.test(trimmed)) return trimmed;
+
+  const match = trimmed.match(/(?:^|\/)status(?:es)?\/(\d+)(?:[/?#]|$)/);
+  if (match?.[1]) return match[1];
+
+  throw new Error(`Invalid tweet id or URL: ${input}`);
+}
+
+function formatSyndicatedTweet(snapshot: NonNullable<Awaited<ReturnType<typeof fetchTweetViaSyndication>>['snapshot']>): string {
+  const author = snapshot.authorHandle ? `@${snapshot.authorHandle}` : '@?';
+  const postedAt = snapshot.postedAt ?? '?';
+  const lines = [
+    `${snapshot.id}  ${author}  ${postedAt}`,
+  ];
+  if (snapshot.authorName) lines.push(snapshot.authorName);
+  lines.push(snapshot.text, '', snapshot.url);
+  if (snapshot.media?.length) {
+    lines.push('', 'Media');
+    lines.push(...snapshot.media.map((url) => `  ${url}`));
+  }
+  return lines.join('\n');
+}
+
 function formatHybridSearchResults(results: HybridSearchResult[], mode: HybridSearchMode): string {
   if (results.length === 0) return 'No results found.';
 
@@ -224,7 +284,15 @@ function formatFeedSearchResults(results: Array<{
     .join('\n\n');
 }
 
-function formatAnalysisList(results: Awaited<ReturnType<typeof listBookmarkAnalysisRecords>>): string {
+function formatAnalysisList(results: Array<{
+  authorHandle?: string;
+  tags: string[];
+  primaryCategory: string;
+  contentType: string;
+  confidence: number;
+  summary: string;
+  url: string;
+}>): string {
   if (results.length === 0) return 'No classified bookmarks found.';
 
   return results
@@ -236,7 +304,16 @@ function formatAnalysisList(results: Awaited<ReturnType<typeof listBookmarkAnaly
     .join('\n\n');
 }
 
-function formatCurationList(results: Awaited<ReturnType<typeof listBookmarkCurationRecords>>): string {
+function formatCurationList(results: Array<{
+  authorHandle?: string;
+  signals: string[];
+  decision: string;
+  value: number;
+  freshness: string;
+  confidence: number;
+  rationale: string;
+  url: string;
+}>): string {
   if (results.length === 0) return 'No curated bookmarks found.';
 
   return results
@@ -768,6 +845,35 @@ export function buildCli() {
       console.log(logo());
       showWhatsNew();
     });
+
+  // ── tweet ───────────────────────────────────────────────────────────────
+
+  const tweet = program
+    .command('tweet')
+    .description('Fetch and inspect individual public X/Twitter posts');
+
+  tweet
+    .command('show')
+    .description('Fetch one public post directly by URL or id')
+    .argument('<url-or-id>', 'X/Twitter status URL or tweet id')
+    .option('--json', 'JSON output')
+    .action(safe(async (input: string, options) => {
+      const tweetId = extractTweetId(input);
+      const result = await fetchTweetViaSyndication(tweetId);
+      if (!result.snapshot) {
+        const suffix = result.httpStatus ? ` (${result.httpStatus})` : '';
+        console.log(`  Tweet unavailable: ${tweetId} [${result.status}${suffix}]`);
+        process.exitCode = 1;
+        return;
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify(result.snapshot, null, 2));
+        return;
+      }
+
+      console.log(formatSyndicatedTweet(result.snapshot));
+    }));
 
   // ── bookmarks ───────────────────────────────────────────────────────────
 
@@ -1954,6 +2060,298 @@ export function buildCli() {
       console.log(`${item.id}  ${item.authorHandle ? `@${item.authorHandle}` : '@?'}  ${(item.likedAt ?? item.postedAt)?.slice(0, 10) ?? '?'}`);
       console.log(item.text);
       console.log(`\n${item.url}`);
+    }));
+
+  // ── classify ────────────────────────────────────────────────────────────
+
+  const likeClassify = likes
+    .command('classify')
+    .description('Classify local likes into semantic categories')
+    .option('--limit <n>', 'Max likes to classify in this run', (v: string) => Number(v))
+    .option('--provider <provider>', 'Provider: mock or openai-compatible')
+    .option('--model <model>', 'Provider model name')
+    .option('--batch-size <n>', 'Likes per model request', (v: string) => Number(v))
+    .option('--refresh', 'Reclassify likes that already have sidecar records', false)
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      if (!requireLikesIndex()) return;
+      const env = { ...process.env };
+      if (options.provider) env.FT_BOOKMARK_ANALYSIS_PROVIDER = String(options.provider);
+      if (options.model) env.FT_BOOKMARK_ANALYSIS_MODEL = String(options.model);
+      if (options.batchSize != null) env.FT_BOOKMARK_ANALYSIS_BATCH_SIZE = String(options.batchSize);
+      const config = loadLikeAnalysisProviderConfig(env);
+
+      let lastProgress: LikeAnalysisProgress = { completed: 0, total: 0, failed: 0, batchNumber: 0, batchTotal: 0 };
+      const spinner = createSpinner(() => {
+        const pct = lastProgress.total > 0 ? Math.round((lastProgress.completed / lastProgress.total) * 100) : 0;
+        return `Classifying likes... ${lastProgress.completed}/${lastProgress.total} (${pct}%) | batch ${lastProgress.batchNumber}/${lastProgress.batchTotal}`;
+      });
+      const result = await runWithSpinner(spinner, () => runLikeAnalysis({
+        limit: options.limit != null ? Number(options.limit) : undefined,
+        refresh: Boolean(options.refresh),
+        config,
+        onProgress: (progress) => {
+          lastProgress = progress;
+          spinner.update();
+        },
+      }));
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log(`  Classified likes: ${result.meta.analyzedCount}/${result.meta.sourceCount}`);
+      if (result.skippedCount > 0) console.log(`  Skipped existing: ${result.skippedCount}`);
+      if (result.meta.failedCount > 0) console.log(`  Failed: ${result.meta.failedCount}`);
+      console.log(`  Provider: ${result.meta.model.provider}`);
+      console.log(`  Model: ${result.meta.model.model}`);
+      console.log(`  Output: ${twitterLikeAnalysisPath()}`);
+      console.log(`  Meta: ${twitterLikeAnalysisMetaPath()}`);
+    }));
+
+  likeClassify
+    .command('status')
+    .description('Show like classification coverage and output paths')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const status = await getLikeAnalysisStatus();
+      if (options.json || likeClassify.opts().json) {
+        console.log(JSON.stringify(status, null, 2));
+        return;
+      }
+
+      console.log(`Classified likes: ${status.analyzedCount}/${status.sourceCount} (${Math.round(status.coverage * 100)}%)`);
+      if (status.meta) {
+        console.log(`Generated: ${status.meta.generatedAt}`);
+        console.log(`Provider: ${status.meta.model.provider}`);
+        console.log(`Model: ${status.meta.model.model}`);
+      }
+      console.log(`Analysis: ${status.analysisPath}`);
+      console.log(`Meta: ${status.metaPath}`);
+    }));
+
+  likeClassify
+    .command('categories')
+    .description('Show category, content type, and tag counts')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const counts = await getLikeAnalysisCategoryCounts();
+      if (options.json || likeClassify.opts().json) {
+        console.log(JSON.stringify(counts, null, 2));
+        return;
+      }
+
+      console.log('Primary categories');
+      console.log(formatTopCounts(counts.primaryCategories));
+      console.log('\nContent types');
+      console.log(formatTopCounts(counts.contentTypes));
+      console.log('\nTags');
+      console.log(formatTopCounts(counts.tags));
+    }));
+
+  likeClassify
+    .command('list')
+    .description('List classified likes with semantic filters')
+    .option('--category <category>', 'Filter by primary category')
+    .option('--content-type <type>', 'Filter by content type')
+    .option('--tag <tag>', 'Filter by tag')
+    .option('--limit <n>', 'Max results', (v: string) => Number(v), 30)
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const tag = normalizeLikeAnalysisTags(options.tag ? [String(options.tag)] : [], 1)[0];
+      const results = await listLikeAnalysisRecords({
+        primaryCategory: options.category ? normalizeLikePrimaryCategory(String(options.category)) : undefined,
+        contentType: options.contentType ? normalizeLikeContentType(String(options.contentType)) : undefined,
+        tag,
+        limit: Number(options.limit) || 30,
+      });
+      if (options.json || likeClassify.opts().json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+      console.log(formatAnalysisList(results));
+    }));
+
+  likeClassify
+    .command('show')
+    .description('Show one like classification')
+    .argument('<id>', 'Like id or tweet id')
+    .option('--json', 'JSON output')
+    .action(safe(async (id: string, options) => {
+      const record = await getLikeAnalysisRecord(String(id));
+      if (!record) {
+        console.log(`  Classified like not found: ${String(id)}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (options.json || likeClassify.opts().json) {
+        console.log(JSON.stringify(record, null, 2));
+        return;
+      }
+      console.log(`${record.id} · ${record.authorHandle ? `@${record.authorHandle}` : '@?'}`);
+      console.log(`${record.primaryCategory}/${record.contentType} · confidence=${record.confidence.toFixed(2)}`);
+      if (record.tags.length) console.log(`tags: ${record.tags.join(', ')}`);
+      console.log(record.summary);
+      console.log(record.url);
+      if (record.rationale) console.log(`rationale: ${record.rationale}`);
+      if (record.evidence.length) console.log(`evidence: ${record.evidence.join(' | ')}`);
+    }));
+
+  likeClassify
+    .command('viz')
+    .description('Terminal dashboard of like classification patterns')
+    .option('--limit-tags <n>', 'Number of top tags to show', (v: string) => Number(v), 20)
+    .action(safe(async (options) => {
+      console.log(await renderLikeAnalysisViz({
+        limitTags: Number(options.limitTags) || 20,
+      }));
+    }));
+
+  // ── curate ──────────────────────────────────────────────────────────────
+
+  const likeCurate = likes
+    .command('curate')
+    .description('Score classified likes for keep/review/remove decisions')
+    .option('--limit <n>', 'Max likes to curate in this run', (v: string) => Number(v))
+    .option('--provider <provider>', 'Provider: mock or openai-compatible')
+    .option('--model <model>', 'Provider model name')
+    .option('--batch-size <n>', 'Likes per model request', (v: string) => Number(v))
+    .option('--refresh', 'Re-curate likes that already have sidecar records', false)
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      if (!requireLikesIndex()) return;
+      const env = { ...process.env };
+      if (options.provider) env.FT_BOOKMARK_ANALYSIS_PROVIDER = String(options.provider);
+      if (options.model) env.FT_BOOKMARK_ANALYSIS_MODEL = String(options.model);
+      if (options.batchSize != null) env.FT_BOOKMARK_ANALYSIS_BATCH_SIZE = String(options.batchSize);
+      const config = loadLikeAnalysisProviderConfig(env);
+
+      let lastProgress: LikeCurationProgress = { completed: 0, total: 0, failed: 0, batchNumber: 0, batchTotal: 0 };
+      const spinner = createSpinner(() => {
+        const pct = lastProgress.total > 0 ? Math.round((lastProgress.completed / lastProgress.total) * 100) : 0;
+        return `Curating likes... ${lastProgress.completed}/${lastProgress.total} (${pct}%) | batch ${lastProgress.batchNumber}/${lastProgress.batchTotal}`;
+      });
+      const result = await runWithSpinner(spinner, () => runLikeCuration({
+        limit: options.limit != null ? Number(options.limit) : undefined,
+        refresh: Boolean(options.refresh),
+        config,
+        onProgress: (progress) => {
+          lastProgress = progress;
+          spinner.update();
+        },
+      }));
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log(`  Curated likes: ${result.meta.curatedCount}/${result.meta.sourceCount}`);
+      if (result.skippedCount > 0) console.log(`  Skipped existing: ${result.skippedCount}`);
+      if (result.meta.failedCount > 0) console.log(`  Failed: ${result.meta.failedCount}`);
+      console.log(`  Provider: ${result.meta.model.provider}`);
+      console.log(`  Model: ${result.meta.model.model}`);
+      console.log(`  Profile: ${result.profilePath}${result.usedDefaultProfile ? ' (default)' : ''}`);
+      console.log(`  Output: ${twitterLikeCurationPath()}`);
+      console.log(`  Meta: ${twitterLikeCurationMetaPath()}`);
+    }));
+
+  likeCurate
+    .command('profile')
+    .description('Create the editable like curation profile if missing')
+    .action(safe(async () => {
+      const profilePath = await ensureLikeCurationProfile();
+      console.log(`Profile: ${profilePath}`);
+    }));
+
+  likeCurate
+    .command('status')
+    .description('Show like curation coverage and output paths')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const status = await getLikeCurationStatus();
+      if (options.json || likeCurate.opts().json) {
+        console.log(JSON.stringify(status, null, 2));
+        return;
+      }
+      console.log(`Curated likes: ${status.curatedCount}/${status.sourceCount} (${Math.round(status.coverage * 100)}%)`);
+      if (status.meta) {
+        console.log(`Generated: ${status.meta.generatedAt}`);
+        console.log(`Provider: ${status.meta.model.provider}`);
+        console.log(`Model: ${status.meta.model.model}`);
+        console.log(`Profile: ${status.meta.profilePath}`);
+      } else {
+        console.log(`Profile: ${twitterLikeCurationProfilePath()}`);
+      }
+      console.log(`Curation: ${status.curationPath}`);
+      console.log(`Meta: ${status.metaPath}`);
+    }));
+
+  likeCurate
+    .command('summary')
+    .description('Show keep/review/remove summary')
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const summary = await getLikeCurationSummary();
+      if (options.json || likeCurate.opts().json) {
+        console.log(JSON.stringify(summary, null, 2));
+        return;
+      }
+      console.log('Decisions');
+      console.log(formatTopCounts(summary.decisions));
+      console.log(`\nAverage value: ${summary.averageValue.toFixed(2)}/5`);
+      console.log(`Low confidence: ${summary.lowConfidenceCount}`);
+      console.log('\nFreshness');
+      console.log(formatTopCounts(summary.freshness));
+      console.log('\nSignals');
+      console.log(formatTopCounts(summary.signals));
+    }));
+
+  likeCurate
+    .command('list')
+    .description('List curated likes with decision filters')
+    .option('--decision <decision>', 'Filter by keep, review, or remove')
+    .option('--signal <signal>', 'Filter by generated signal')
+    .option('--limit <n>', 'Max results', (v: string) => Number(v), 30)
+    .option('--json', 'JSON output')
+    .action(safe(async (options) => {
+      const decision = options.decision ? normalizeLikeCurationDecision(String(options.decision)) : undefined;
+      const signal = normalizeLikeCurationSignals(options.signal ? [String(options.signal)] : [], 1)[0];
+      const results = await listLikeCurationRecords({
+        decision,
+        signal,
+        limit: Number(options.limit) || 30,
+      });
+      if (options.json || likeCurate.opts().json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+      console.log(formatCurationList(results));
+    }));
+
+  likeCurate
+    .command('show')
+    .description('Show one like curation record')
+    .argument('<id>', 'Like id or tweet id')
+    .option('--json', 'JSON output')
+    .action(safe(async (id: string, options) => {
+      const record = await getLikeCurationRecord(String(id));
+      if (!record) {
+        console.log(`  Curated like not found: ${String(id)}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (options.json || likeCurate.opts().json) {
+        console.log(JSON.stringify(record, null, 2));
+        return;
+      }
+      console.log(`${record.id} · ${record.authorHandle ? `@${record.authorHandle}` : '@?'}`);
+      console.log(`${record.decision} · value=${record.value}/5 · freshness=${record.freshness} · confidence=${record.confidence.toFixed(2)}`);
+      if (record.signals.length) console.log(`signals: ${record.signals.join(', ')}`);
+      console.log(record.rationale);
+      console.log(record.url);
+      if (record.evidence.length) console.log(`evidence: ${record.evidence.join(' | ')}`);
     }));
 
   likes
