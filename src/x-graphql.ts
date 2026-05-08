@@ -131,6 +131,10 @@ function shouldFallbackToCurl(error: unknown): boolean {
   );
 }
 
+export function shouldForceCurlForXRequests(env: NodeJS.ProcessEnv = process.env): boolean {
+  return /^(1|true|yes)$/i.test(env.FT_X_USE_CURL?.trim() ?? '');
+}
+
 function classifyTransportFailure(detail: string): XRequestErrorKind {
   if (/(401|403|forbidden|unauthorized|expired)/i.test(detail)) return 'auth';
   if (/(429|rate limit)/i.test(detail)) return 'rate_limit';
@@ -174,7 +178,7 @@ async function fetchViaCurl(input: string, init?: RequestInit): Promise<Response
   const headerPath = path.join(tmpDir, 'headers.txt');
   const bodyPath = path.join(tmpDir, 'body.txt');
   const method = init?.method ?? 'GET';
-  const args = ['-sS', '-L', '-X', method, input, '-D', headerPath, '-o', bodyPath];
+  const args = ['-sS', '-L', '--connect-timeout', '10', '--max-time', '45', '-X', method, input, '-D', headerPath, '-o', bodyPath];
 
   try {
     for (const [key, value] of Object.entries(init?.headers as Record<string, string> ?? {})) {
@@ -215,6 +219,8 @@ async function fetchViaCurl(input: string, init?: RequestInit): Promise<Response
 }
 
 export async function fetchXResource(input: string, init?: RequestInit): Promise<Response> {
+  if (shouldForceCurlForXRequests()) return fetchViaCurl(input, init);
+
   try {
     return await fetch(input, init);
   } catch (error) {

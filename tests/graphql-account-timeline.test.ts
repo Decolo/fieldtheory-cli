@@ -341,6 +341,44 @@ test('syncAccountTimelineGraphQL surfaces auth failures during account lookup', 
   }
 });
 
+test('syncAccountTimelineGraphQL checkpoints and returns when timeline hits rate limit', async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'ft-account-sync-rate-limit-'));
+  process.env.FT_DATA_DIR = tmpDir;
+
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify({
+        data: { user: { result: makeUserResult() } },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('too many requests', { status: 429 });
+  };
+
+  try {
+    const result = await syncAccountTimelineGraphQL('@elonmusk', {
+      limit: 10,
+      retain: '90d',
+      csrfToken: 'ct0',
+      cookieHeader: 'ct0=ct0; auth_token=auth',
+    });
+
+    assert.equal(result.stopReason, 'rate limit exceeded');
+    assert.equal(result.totalItems, 0);
+    assert.equal(calls, 5);
+
+    const state = await readJson<any>(result.statePath);
+    assert.equal(state.stopReason, 'rate limit exceeded');
+    assert.equal(state.totalStored, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.FT_DATA_DIR;
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('syncAccountTimelineGraphQL reports stale stop reason when no newer tweets are added', async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'ft-account-sync-stale-'));
   process.env.FT_DATA_DIR = tmpDir;
@@ -405,6 +443,78 @@ test('syncAccountTimelineGraphQL reports stale stop reason when no newer tweets 
 
     assert.equal(result.added, 0);
     assert.equal(result.stopReason, 'no new tweets (stale)');
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.FT_DATA_DIR;
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('syncAccountTimelineGraphQL backfills older pages when backfillAll is enabled', async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'ft-account-sync-backfill-'));
+  process.env.FT_DATA_DIR = tmpDir;
+
+  await mkdir(path.join(tmpDir, 'accounts', '44196397'), { recursive: true });
+  const existingRecord = {
+    id: '1900000000000000003',
+    tweetId: '1900000000000000003',
+    targetUserId: '44196397',
+    targetHandle: 'elonmusk',
+    targetName: 'Elon Musk',
+    url: 'https://x.com/elonmusk/status/1900000000000000003',
+    text: 'newest post',
+    authorHandle: 'elonmusk',
+    authorName: 'Elon Musk',
+    syncedAt: '2026-04-18T08:00:00.000Z',
+    postedAt: 'Sun Apr 19 09:00:00 +0000 2026',
+    links: [],
+    tags: [],
+    ingestedVia: 'graphql' as const,
+  };
+  await writeJsonLines(path.join(tmpDir, 'accounts', '44196397', 'timeline.jsonl'), [existingRecord]);
+
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify({
+        data: { user: { result: makeUserResult() } },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (calls === 2) {
+      return new Response(JSON.stringify(makeTimelineResponse([
+        makeEntry(makeTweetResult({
+          rest_id: '1900000000000000003',
+          legacy: { ...makeTweetResult().legacy, id_str: '1900000000000000003', full_text: 'newest post' },
+        })),
+        {
+          entryId: 'cursor-bottom-1',
+          content: { cursorType: 'Bottom', value: 'next-cursor' },
+        },
+      ])), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify(makeTimelineResponse([
+      makeEntry(makeTweetResult({
+        rest_id: '1900000000000000002',
+        legacy: { ...makeTweetResult().legacy, id_str: '1900000000000000002', full_text: 'older post' },
+      })),
+    ])), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    const result = await syncAccountTimelineGraphQL('@elonmusk', {
+      limit: 50,
+      retain: '90d',
+      backfillAll: true,
+      csrfToken: 'ct0',
+      cookieHeader: 'ct0=ct0; auth_token=auth',
+    });
+
+    assert.equal(result.added, 1);
+    assert.equal(result.totalItems, 2);
+    assert.equal(result.stopReason, 'end of timeline');
+    assert.equal(calls, 3);
   } finally {
     globalThis.fetch = originalFetch;
     delete process.env.FT_DATA_DIR;

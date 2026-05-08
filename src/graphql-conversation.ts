@@ -1,4 +1,4 @@
-import { buildXGraphqlHeaders, fetchXResource, resolveXSessionAuth, XRequestError, xApiOrigin, xGraphqlOrigin, type XSessionOptions } from './x-graphql.js';
+import { buildGraphqlUrl, buildXGraphqlHeaders, fetchXResource, resolveXSessionAuth, XRequestError, xGraphqlOrigin, type XSessionOptions } from './x-graphql.js';
 import type {
   BookmarkAuthorSnapshot,
   FeedConversationBundle,
@@ -77,16 +77,86 @@ function extractQuotedTweet(quotedResult: any): FeedConversationReply['quotedTwe
   };
 }
 
-function buildConversationSearchUrl(conversationId: string): string {
+interface ConversationFetchOptions extends XSessionOptions {
+  maxReplies?: number;
+  maxPages?: number;
+}
+
+const TWEET_DETAIL_QUERY_ID = 'QrLp7AR-eMyamw8D1N9l6A';
+const TWEET_DETAIL_OPERATION = 'TweetDetail';
+
+const TWEET_DETAIL_FEATURES = {
+  rweb_video_screen_enabled: false,
+  rweb_cashtags_enabled: true,
+  profile_label_improvements_pcf_label_in_post_enabled: true,
+  responsive_web_profile_redirect_enabled: false,
+  rweb_tipjar_consumption_enabled: true,
+  verified_phone_label_enabled: false,
+  creator_subscriptions_tweet_preview_api_enabled: true,
+  responsive_web_graphql_timeline_navigation_enabled: true,
+  responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
+  premium_content_api_read_enabled: false,
+  communities_web_enable_tweet_community_results_fetch: true,
+  c9s_tweet_anatomy_moderator_badge_enabled: true,
+  responsive_web_grok_analyze_button_fetch_trends_enabled: false,
+  responsive_web_grok_analyze_post_followups_enabled: true,
+  responsive_web_jetfuel_frame: true,
+  responsive_web_grok_share_attachment_enabled: true,
+  responsive_web_grok_annotations_enabled: true,
+  articles_preview_enabled: true,
+  responsive_web_edit_tweet_api_enabled: true,
+  graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
+  view_counts_everywhere_api_enabled: true,
+  longform_notetweets_consumption_enabled: true,
+  responsive_web_twitter_article_tweet_consumption_enabled: true,
+  content_disclosure_indicator_enabled: true,
+  content_disclosure_ai_generated_indicator_enabled: true,
+  responsive_web_grok_show_grok_translated_post: true,
+  responsive_web_grok_analysis_button_from_backend: true,
+  post_ctas_fetch_enabled: true,
+  freedom_of_speech_not_reach_fetch_enabled: true,
+  standardized_nudges_misinfo: true,
+  tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
+  longform_notetweets_rich_text_read_enabled: true,
+  longform_notetweets_inline_media_enabled: false,
+  responsive_web_grok_image_annotation_enabled: true,
+  responsive_web_grok_imagine_annotation_enabled: true,
+  responsive_web_grok_community_note_auto_translation_is_enabled: true,
+  responsive_web_enhance_cards_enabled: false,
+};
+
+const TWEET_DETAIL_FIELD_TOGGLES = {
+  withPayments: false,
+  withAuxiliaryUserLabels: true,
+  withArticleRichContentState: true,
+  withArticlePlainText: false,
+  withArticleSummaryText: false,
+  withArticleVoiceOver: false,
+  withGrokAnalyze: false,
+  withDisallowedReplyControls: false,
+};
+
+function buildConversationDetailUrl(tweetId: string, cursor?: string): string {
+  const variables = {
+    focalTweetId: tweetId,
+    cursor,
+    referrer: 'tweet',
+    with_rux_injections: false,
+    rankingMode: 'Relevance',
+    includePromotedContent: true,
+    withCommunity: true,
+    withQuickPromoteEligibilityTweetFields: true,
+    withBirdwatchNotes: true,
+    withVoice: true,
+    isReaderMode: false,
+  };
+  if (!cursor) delete (variables as { cursor?: string }).cursor;
   const params = new URLSearchParams({
-    query: `conversation_id:${conversationId}`,
-    max_results: '100',
-    expansions: 'author_id,attachments.media_keys',
-    'tweet.fields': 'author_id,attachments,conversation_id,created_at,entities,in_reply_to_user_id,lang,note_tweet,possibly_sensitive,public_metrics,referenced_tweets,source',
-    'user.fields': 'description,location,name,profile_image_url,public_metrics,username,verified',
-    'media.fields': 'alt_text,height,media_key,preview_image_url,type,url,width',
+    variables: JSON.stringify(variables),
+    features: JSON.stringify(TWEET_DETAIL_FEATURES),
+    fieldToggles: JSON.stringify(TWEET_DETAIL_FIELD_TOGGLES),
   });
-  return `${xApiOrigin()}/2/tweets/search/recent?${params}`;
+  return `${buildGraphqlUrl(TWEET_DETAIL_QUERY_ID, TWEET_DETAIL_OPERATION)}?${params}`;
 }
 
 function buildStatusUrl(tweetId: string, handle?: string): string {
@@ -269,6 +339,24 @@ function collectInstructionEntries(instructions: any[]): any[] {
   return entries;
 }
 
+function extractBottomCursor(entry: any): string | undefined {
+  const content = entry?.content;
+  const cursorType = content?.cursorType ?? content?.cursor_type;
+  if (entry?.entryId?.includes('cursor-bottom') || cursorType === 'Bottom') {
+    const value = content?.value;
+    return typeof value === 'string' && value ? value : undefined;
+  }
+  return undefined;
+}
+
+function collectBottomCursor(instructions: any[]): string | undefined {
+  for (const entry of collectInstructionEntries(instructions)) {
+    const cursor = extractBottomCursor(entry);
+    if (cursor) return cursor;
+  }
+  return undefined;
+}
+
 function collectTweetResults(entry: any): any[] {
   const direct = entry?.content?.itemContent?.tweet_results?.result;
   if (direct) return [direct];
@@ -372,7 +460,40 @@ export function parseConversationResponse(json: any, options: { now?: string; ta
   };
 }
 
-export async function fetchConversationContext(record: FeedRecord, options: XSessionOptions = {}): Promise<FeedConversationBundle> {
+function parseConversationPage(json: any, options: { now: string; target: FeedConversationTarget }): { bundle: FeedConversationBundle; nextCursor?: string } {
+  const bundle = parseConversationResponse(json, options);
+  const instructions =
+    json?.data?.threaded_conversation_with_injections_v2?.instructions ??
+    json?.data?.threaded_conversation_with_injections?.instructions;
+  return {
+    bundle,
+    nextCursor: Array.isArray(instructions) ? collectBottomCursor(instructions) : undefined,
+  };
+}
+
+function emptyBundle(target: FeedConversationTarget, now: string): FeedConversationBundle {
+  return {
+    schemaVersion: 1,
+    rootFeedTweetId: target.rootFeedTweetId,
+    rootFeedItemId: target.rootFeedItemId,
+    conversationTweetId: target.conversationTweetId,
+    conversationId: target.conversationId,
+    targetKind: target.targetKind,
+    targetUrl: target.targetUrl,
+    fetchedAt: now,
+    outcome: 'success',
+    summary: 'Conversation fetched successfully with no replies returned.',
+    replies: [],
+  };
+}
+
+function normalizePositiveInteger(value: unknown): number | undefined {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue) || numberValue <= 0) return undefined;
+  return Math.floor(numberValue);
+}
+
+export async function fetchConversationContext(record: FeedRecord, options: ConversationFetchOptions = {}): Promise<FeedConversationBundle> {
   const target = resolveConversationTarget(record);
   const now = new Date().toISOString();
   if (!target) {
@@ -392,26 +513,72 @@ export async function fetchConversationContext(record: FeedRecord, options: XSes
   }
 
   const session = resolveXSessionAuth(options);
-  const response = await fetchXResource(buildConversationSearchUrl(target.conversationId), {
-    headers: buildXGraphqlHeaders(session, { referer: target.targetUrl }),
-  });
+  const maxReplies = normalizePositiveInteger(options.maxReplies);
+  const maxPages = normalizePositiveInteger(options.maxPages);
+  const replies = new Map<string, FeedConversationReply>();
+  let nextToken: string | undefined;
+  let fetchedPages = 0;
+  let stoppedByLimit = false;
 
-  if (!response.ok) {
-    const text = await response.text();
-    if (response.status === 401 || response.status === 403) {
-      throw new XRequestError(
-        `Conversation request unauthorized (${response.status}). Refresh your X session in the browser and retry.`,
-        { kind: 'auth', status: response.status },
-      );
-    }
-    if (response.status === 404) {
-      return unavailableBundle(target, now, 'deleted', 'Conversation target is unavailable or deleted.');
-    }
-    throw new XRequestError(`Conversation request failed (${response.status}). Response: ${text.slice(0, 300)}`, {
-      kind: response.status >= 500 ? 'upstream' : 'unknown',
-      status: response.status,
+  do {
+    const response = await fetchXResource(buildConversationDetailUrl(target.conversationTweetId, nextToken), {
+      headers: buildXGraphqlHeaders(session, { referer: target.targetUrl }),
     });
-  }
 
-  return parseConversationResponse(await response.json(), { now, target });
+    if (!response.ok) {
+      const text = await response.text();
+      if (response.status === 401 || response.status === 403) {
+        throw new XRequestError(
+          `Conversation request unauthorized (${response.status}). Refresh your X session in the browser and retry.`,
+          { kind: 'auth', status: response.status },
+        );
+      }
+      if (response.status === 404) {
+        return unavailableBundle(target, now, 'deleted', 'Conversation target is unavailable or deleted.');
+      }
+      throw new XRequestError(`Conversation request failed (${response.status}). Response: ${text.slice(0, 300)}`, {
+        kind: response.status >= 500 ? 'upstream' : 'unknown',
+        status: response.status,
+      });
+    }
+
+    const json = await response.json();
+    fetchedPages += 1;
+    const { bundle: pageBundle, nextCursor } = parseConversationPage(json, { now, target });
+    if (pageBundle.outcome === 'unavailable') return pageBundle;
+
+    for (const [replyIndex, reply] of pageBundle.replies.entries()) {
+      if (!replies.has(reply.tweetId)) replies.set(reply.tweetId, reply);
+      if (maxReplies && replies.size >= maxReplies) {
+        stoppedByLimit = Boolean(nextCursor) || replyIndex < pageBundle.replies.length - 1;
+        break;
+      }
+    }
+
+    nextToken = nextCursor;
+    if (maxReplies && replies.size >= maxReplies) break;
+    if (maxPages && fetchedPages >= maxPages && nextToken) {
+      stoppedByLimit = true;
+      break;
+    }
+  } while (nextToken);
+
+  const replyList = Array.from(replies.values());
+  return {
+    schemaVersion: 1,
+    rootFeedTweetId: target.rootFeedTweetId,
+    rootFeedItemId: target.rootFeedItemId,
+    conversationTweetId: target.conversationTweetId,
+    conversationId: target.conversationId,
+    targetKind: target.targetKind,
+    targetUrl: target.targetUrl,
+    fetchedAt: now,
+    outcome: stoppedByLimit ? 'partial' : 'success',
+    summary: replyList.length === 0
+      ? 'Conversation fetched successfully with no replies returned.'
+      : stoppedByLimit
+        ? `Conversation fetched partially across ${fetchedPages} page${fetchedPages === 1 ? '' : 's'} with ${replyList.length} replies stored.`
+        : `Conversation fetched successfully across ${fetchedPages} page${fetchedPages === 1 ? '' : 's'} with ${replyList.length} repl${replyList.length === 1 ? 'y' : 'ies'}.`,
+    replies: replyList,
+  };
 }

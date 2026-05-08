@@ -25,6 +25,17 @@ export interface AccountTimelineFilters {
   offset?: number;
 }
 
+export interface AccountTimelineSearchOptions {
+  query: string;
+  limit?: number;
+  after?: string;
+  before?: string;
+}
+
+export interface AccountTimelineSearchResult extends AccountTimelineItem {
+  score: number;
+}
+
 function parseJsonArray(value: unknown): string[] {
   if (typeof value !== 'string' || !value.trim()) return [];
   try {
@@ -62,6 +73,22 @@ function initSchema(db: Database): void {
   )`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_timeline_posted ON timeline(posted_at)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_timeline_synced ON timeline(synced_at)`);
+  ensureTimelineFts(db);
+}
+
+function ensureTimelineFts(db: Database): boolean {
+  const existing = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='timeline_fts'");
+  const hadFts = Boolean(existing[0]?.values?.length);
+  db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS timeline_fts USING fts5(
+    text,
+    author_handle,
+    author_name,
+    content=timeline,
+    content_rowid=rowid,
+    tokenize='porter unicode61'
+  )`);
+  if (!hadFts) db.run(`INSERT INTO timeline_fts(timeline_fts) VALUES('rebuild')`);
+  return !hadFts;
 }
 
 function insertRecord(db: Database, record: AccountTimelineRecord): void {
@@ -111,7 +138,10 @@ export async function buildAccountTimelineIndex(userId: string, options?: { forc
   const db = await openDb(dbPath);
 
   try {
-    if (options?.force) db.run('DROP TABLE IF EXISTS timeline');
+    if (options?.force) {
+      db.run('DROP TABLE IF EXISTS timeline_fts');
+      db.run('DROP TABLE IF EXISTS timeline');
+    }
     initSchema(db);
 
     const existingIds = new Set<string>();
@@ -129,12 +159,82 @@ export async function buildAccountTimelineIndex(userId: string, options?: { forc
       throw error;
     }
 
+    db.run(`INSERT INTO timeline_fts(timeline_fts) VALUES('rebuild')`);
     saveDb(db, dbPath);
     return {
       dbPath,
       recordCount: Number(db.exec('SELECT COUNT(*) FROM timeline')[0]?.values?.[0]?.[0] ?? 0),
       newRecords: records.filter((record) => !existingIds.has(record.id)).length,
     };
+  } finally {
+    db.close();
+  }
+}
+
+function isMissingAccountTimelineIndexError(error: unknown): boolean {
+  const message = (error as Error).message ?? '';
+  return message.includes('no such table') || message.includes('no such column');
+}
+
+function accountTimelineDateExpression(alias: string): string {
+  return `COALESCE(${alias}.posted_at, ${alias}.synced_at)`;
+}
+
+export async function searchAccountTimeline(userId: string, options: AccountTimelineSearchOptions): Promise<AccountTimelineSearchResult[]> {
+  const dbPath = twitterAccountTimelineIndexPath(userId);
+  const db = await openDb(dbPath);
+  const limit = Math.max(1, options.limit ?? 20);
+  const conditions = [`t.rowid IN (SELECT rowid FROM timeline_fts WHERE timeline_fts MATCH ?)`];
+  const params: Array<string | number> = [options.query];
+
+  if (options.after) {
+    conditions.push(`${accountTimelineDateExpression('t')} >= ?`);
+    params.push(options.after);
+  }
+  if (options.before) {
+    conditions.push(`${accountTimelineDateExpression('t')} <= ?`);
+    params.push(options.before);
+  }
+
+  try {
+    ensureTimelineFts(db);
+    const rows = db.exec(
+      `SELECT
+        t.id,
+        t.tweet_id,
+        t.target_user_id,
+        t.target_handle,
+        t.url,
+        t.text,
+        t.author_handle,
+        t.author_name,
+        t.posted_at,
+        t.synced_at,
+        t.media_count,
+        t.link_count,
+        t.links_json,
+        bm25(timeline_fts, 5.0, 1.0, 1.0) AS score
+      FROM timeline t
+      JOIN timeline_fts ON timeline_fts.rowid = t.rowid
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY bm25(timeline_fts, 5.0, 1.0, 1.0) ASC,
+        ${accountTimelineDateExpression('t')} DESC,
+        CAST(t.tweet_id AS INTEGER) DESC
+      LIMIT ?`,
+      [...params, limit],
+    );
+    saveDb(db, dbPath);
+    return (rows[0]?.values ?? []).map((row) => ({
+      ...mapRow(row),
+      score: Number(row[13] ?? 0),
+    }));
+  } catch (error) {
+    const message = (error as Error).message ?? '';
+    if (message.includes('fts5') || message.includes('MATCH') || message.includes('syntax')) {
+      throw new Error(`Invalid search query: "${options.query}". Try simpler terms or wrap phrases in double quotes.`);
+    }
+    if (!isMissingAccountTimelineIndexError(error)) throw error;
+    throw new Error(`Account index not built yet. Run: ft accounts sync @${userId}`);
   } finally {
     db.close();
   }

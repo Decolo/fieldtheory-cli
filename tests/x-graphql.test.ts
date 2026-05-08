@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { XRequestError, buildXGraphqlHeaders, sanitizeSensitiveText } from '../src/x-graphql.js';
+import { XRequestError, buildXGraphqlHeaders, sanitizeSensitiveText, shouldForceCurlForXRequests } from '../src/x-graphql.js';
 
 test('sanitizeSensitiveText redacts X session secrets from command text', () => {
   const raw = [
@@ -50,4 +50,11 @@ test('buildXGraphqlHeaders aligns baseline language and origin headers with web 
   } finally {
     delete process.env.FT_X_API_ORIGIN;
   }
+});
+
+test('shouldForceCurlForXRequests detects the explicit curl transport switch', () => {
+  assert.equal(shouldForceCurlForXRequests({}), false);
+  assert.equal(shouldForceCurlForXRequests({ https_proxy: 'http://127.0.0.1:7890' }), false);
+  assert.equal(shouldForceCurlForXRequests({ FT_X_USE_CURL: '1' }), true);
+  assert.equal(shouldForceCurlForXRequests({ FT_X_USE_CURL: 'true' }), true);
 });
