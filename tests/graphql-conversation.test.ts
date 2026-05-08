@@ -144,47 +144,14 @@ test('parseConversationResponse returns unavailable outcome for deleted/protecte
   assert.equal(protectedResult.unavailableReason, 'protected');
 });
 
-test('fetchConversationContext uses conversation search request and returns normalized bundle', async () => {
+test('fetchConversationContext uses TweetDetail request and returns normalized bundle', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-    assert.match(String(input), /\/2\/tweets\/search\/recent/);
+    assert.match(String(input), /\/i\/api\/graphql\/.+\/TweetDetail/);
     assert.equal(init?.headers && (init.headers as Record<string, string>).referer, 'https://x.com/source/status/1800000000000000000');
-    return new Response(JSON.stringify({
-      data: [
-        {
-          id: '1900000000000000001',
-          text: 'reply text',
-          author_id: '42',
-          created_at: '2026-04-24T07:00:00.000Z',
-          conversation_id: '1800000000000000000',
-          in_reply_to_user_id: '100',
-          lang: 'en',
-          public_metrics: {
-            like_count: 5,
-            retweet_count: 1,
-            reply_count: 2,
-            quote_count: 0,
-            bookmark_count: 0,
-            impression_count: 25,
-          },
-          referenced_tweets: [{ type: 'replied_to', id: '1800000000000000000' }],
-        },
-      ],
-      includes: {
-        users: [{
-          id: '42',
-          username: 'alice',
-          name: 'Alice',
-          profile_image_url: 'https://pbs.twimg.com/profile_images/alice.jpg',
-          verified: false,
-          public_metrics: {
-            followers_count: 100,
-            following_count: 50,
-            tweet_count: 20,
-          },
-        }],
-      },
-    }), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify(makeConversationResponse([
+      makeEntry(makeTweetResult()),
+    ])), { status: 200, headers: { 'content-type': 'application/json' } });
   };
 
   try {
@@ -195,6 +162,97 @@ test('fetchConversationContext uses conversation search request and returns norm
     assert.equal(result.outcome, 'success');
     assert.equal(result.replies.length, 1);
     assert.equal(result.rootFeedTweetId, '1800000000000000000');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchConversationContext follows TweetDetail bottom cursors', async () => {
+  const originalFetch = globalThis.fetch;
+  const seenUrls: string[] = [];
+  globalThis.fetch = async (input: RequestInfo | URL) => {
+    seenUrls.push(String(input));
+    const page = seenUrls.length;
+    return new Response(JSON.stringify({
+      data: {
+        threaded_conversation_with_injections_v2: {
+          instructions: [{
+            type: 'TimelineAddEntries',
+            entries: [
+              makeEntry(makeTweetResult({
+                rest_id: `190000000000000000${page}`,
+                legacy: {
+                  ...makeTweetResult().legacy,
+                  id_str: `190000000000000000${page}`,
+                  full_text: `reply page ${page}`,
+                },
+              })),
+              ...(page === 1 ? [{ entryId: 'cursor-bottom-1', content: { cursorType: 'Bottom', value: 'NEXT_PAGE' } }] : []),
+            ],
+          }],
+        },
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    const result = await fetchConversationContext(makeRecord(), {
+      csrfToken: 'ct0',
+      cookieHeader: 'ct0=ct0; auth_token=auth',
+    });
+    assert.equal(result.outcome, 'success');
+    assert.equal(result.replies.length, 2);
+    assert.equal(seenUrls.length, 2);
+    assert.doesNotMatch(decodeURIComponent(seenUrls[0]), /"cursor":"NEXT_PAGE"/);
+    assert.match(decodeURIComponent(seenUrls[1]), /"cursor":"NEXT_PAGE"/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchConversationContext marks partial when maxPages stops before next token', async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return new Response(JSON.stringify(makeConversationResponse([
+      makeEntry(makeTweetResult()),
+      { entryId: 'cursor-bottom-1', content: { cursorType: 'Bottom', value: 'NEXT_PAGE' } },
+    ])), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    const result = await fetchConversationContext(makeRecord(), {
+      csrfToken: 'ct0',
+      cookieHeader: 'ct0=ct0; auth_token=auth',
+      maxPages: 1,
+    });
+    assert.equal(result.outcome, 'partial');
+    assert.equal(result.replies.length, 1);
+    assert.equal(fetchCount, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchConversationContext marks partial when maxReplies truncates a page', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify(makeConversationResponse([
+    makeEntry(makeTweetResult()),
+    makeEntry(makeTweetResult({
+      rest_id: '1900000000000000002',
+      legacy: { ...makeTweetResult().legacy, id_str: '1900000000000000002', full_text: 'reply two' },
+    })),
+  ])), { status: 200, headers: { 'content-type': 'application/json' } });
+
+  try {
+    const result = await fetchConversationContext(makeRecord(), {
+      csrfToken: 'ct0',
+      cookieHeader: 'ct0=ct0; auth_token=auth',
+      maxReplies: 1,
+    });
+    assert.equal(result.outcome, 'partial');
+    assert.equal(result.replies.length, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }

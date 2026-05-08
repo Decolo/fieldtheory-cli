@@ -9,6 +9,7 @@ export interface FeedContextSyncOptions extends XSessionOptions {
   limit?: number;
   tweetId?: string;
   maxReplies?: number;
+  maxPages?: number;
 }
 
 export interface FeedContextSyncResult {
@@ -70,9 +71,11 @@ export async function syncFeedConversationContext(options: FeedContextSyncOption
       continue;
     }
 
+    const maxReplies = Number(options.maxReplies);
+    const maxRepliesForFetch = Number.isFinite(maxReplies) ? maxReplies : 40;
     const bundle = trimReplies(
-      await fetchConversationContext(candidate, options),
-      Math.max(1, Number(options.maxReplies) || 40),
+      await fetchConversationContext(candidate, { ...options, maxReplies: maxRepliesForFetch }),
+      maxRepliesForFetch,
     );
     await writeFeedConversationBundle(bundle);
     bundles.push(bundle);
