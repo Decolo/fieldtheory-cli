@@ -19,7 +19,7 @@ const FIXTURES = [
     targetUserId: '44196397',
     targetHandle: 'elonmusk',
     url: 'https://x.com/elonmusk/status/1',
-    text: 'launching something soon',
+    text: 'launching investment forecast soon',
     authorHandle: 'elonmusk',
     authorName: 'Elon Musk',
     syncedAt: '2026-04-19T08:00:00Z',
@@ -105,7 +105,52 @@ test('ft accounts show prints one cached tracked-account tweet', async () => {
     const { stdout } = await runCli(['accounts', 'show', '@elonmusk', '1'], dir);
 
     assert.match(stdout, /Elon Musk/);
-    assert.match(stdout, /launching something soon/);
+    assert.match(stdout, /launching investment forecast soon/);
+  });
+});
+
+test('ft accounts search prints matching cached account tweets', async () => {
+  await withAccountDataDir(async (dir) => {
+    const { stdout, code } = await runCli(['accounts', 'search', '@elonmusk', 'investment', '--limit', '1'], dir);
+
+    assert.equal(code, 0);
+    assert.match(stdout, /@elonmusk/);
+    assert.match(stdout, /investment forecast/);
+    assert.match(stdout, /https:\/\/x\.com\/elonmusk\/status\/1/);
+  });
+});
+
+test('ft accounts search --json prints structured matches', async () => {
+  await withAccountDataDir(async (dir) => {
+    const { stdout, code } = await runCli(['accounts', 'search', '@elonmusk', 'investment', '--json'], dir);
+
+    assert.equal(code, 0);
+    const payload = JSON.parse(stdout);
+    assert.equal(payload[0]?.tweetId, '1');
+    assert.equal(typeof payload[0]?.score, 'number');
+  });
+});
+
+test('ft accounts brief prints a local evidence summary', async () => {
+  await withAccountDataDir(async (dir) => {
+    const { stdout, code } = await runCli(['accounts', 'brief', '@elonmusk', 'investment'], dir);
+
+    assert.equal(code, 0);
+    assert.match(stdout, /Account brief: @elonmusk/);
+    assert.match(stdout, /Found 1 cached tweet/);
+    assert.match(stdout, /investment forecast/);
+  });
+});
+
+test('ft accounts brief --json prints evidence payload', async () => {
+  await withAccountDataDir(async (dir) => {
+    const { stdout, code } = await runCli(['accounts', 'brief', '@elonmusk', 'investment', '--json'], dir);
+
+    assert.equal(code, 0);
+    const payload = JSON.parse(stdout);
+    assert.equal(payload.account.handle, 'elonmusk');
+    assert.equal(payload.topic, 'investment');
+    assert.equal(payload.items[0]?.tweetId, '1');
   });
 });
 
@@ -219,5 +264,31 @@ test('ft accounts export writes JSON to a file with --out', async () => {
     const payload = JSON.parse(await readFile(outputPath, 'utf8'));
     assert.equal(payload.account.userId, '44196397');
     assert.equal(payload.count, 1);
+  });
+});
+
+test('ft accounts export --format jsonl prints one JSON object per tweet', async () => {
+  await withAccountDataDir(async (dir) => {
+    const { stdout, code } = await runCli(
+      ['accounts', 'export', '@elonmusk', '--format', 'jsonl'],
+      dir,
+    );
+    assert.equal(code, 0);
+    const lines = stdout.trim().split('\n');
+    assert.equal(lines.length, 1);
+    const item = JSON.parse(lines[0]!);
+    assert.equal(item.tweetId, '1');
+    assert.equal(item.text, 'launching investment forecast soon');
+  });
+});
+
+test('ft accounts export rejects unknown formats', async () => {
+  await withAccountDataDir(async (dir) => {
+    const { stdout, stderr, code } = await runCli(
+      ['accounts', 'export', '@elonmusk', '--format', 'csv'],
+      dir,
+    );
+    assert.equal(code, 1);
+    assert.match(`${stdout}${stderr}`, /Invalid export format/);
   });
 });

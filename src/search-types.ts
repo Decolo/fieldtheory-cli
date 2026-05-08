@@ -1,4 +1,4 @@
-export type HybridSearchSource = 'bookmarks' | 'likes' | 'feed';
+export type HybridSearchSource = 'bookmarks' | 'likes' | 'feed' | 'accounts';
 export type HybridSearchMode = 'topic' | 'action';
 export type HybridSearchScope = HybridSearchSource | 'all';
 
@@ -21,6 +21,7 @@ export interface HybridSearchResult {
   isBookmarked: boolean;
   isLiked: boolean;
   isInFeed: boolean;
+  isTrackedAccount: boolean;
 }
 
 export interface HybridSearchResponse {

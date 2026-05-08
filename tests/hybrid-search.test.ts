@@ -2,11 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { writeJson, writeJsonLines } from '../src/fs.js';
 import { buildIndex } from '../src/bookmarks-db.js';
 import { buildLikesIndex } from '../src/likes-db.js';
 import { buildFeedIndex } from '../src/feed-db.js';
+import { rememberAccountHandle } from '../src/account-registry.js';
+import { buildAccountTimelineIndex } from '../src/account-timeline-db.js';
 import { runHybridSearch } from '../src/hybrid-search.js';
 
 const BOOKMARKS = [
@@ -95,6 +97,25 @@ const FEED = [
   },
 ];
 
+const ACCOUNT_TIMELINE = [
+  {
+    id: 'account-1',
+    tweetId: 'account-1',
+    targetUserId: '44196397',
+    targetHandle: 'elonmusk',
+    url: 'https://x.com/elonmusk/status/account-1',
+    text: 'Tracked account notes on Claude Code agent workflows.',
+    authorHandle: 'elonmusk',
+    authorName: 'Elon Musk',
+    syncedAt: '2026-04-06T00:00:00Z',
+    postedAt: '2026-04-06T00:00:00Z',
+    links: [],
+    tags: [],
+    media: [],
+    ingestedVia: 'graphql',
+  },
+];
+
 async function withHybridArchiveData(fn: () => Promise<void>): Promise<void> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-hybrid-search-'));
   process.env.FT_DATA_DIR = dir;
@@ -121,10 +142,14 @@ async function withHybridArchiveData(fn: () => Promise<void>): Promise<void> {
       totalItems: FEED.length,
       totalSkippedEntries: 0,
     });
+    await rememberAccountHandle({ userId: '44196397', handle: '@elonmusk', name: 'Elon Musk' });
+    await mkdir(path.join(dir, 'accounts', '44196397'), { recursive: true });
+    await writeJsonLines(path.join(dir, 'accounts', '44196397', 'timeline.jsonl'), ACCOUNT_TIMELINE);
 
     await buildIndex();
     await buildLikesIndex();
     await buildFeedIndex();
+    await buildAccountTimelineIndex('44196397');
     await fn();
   } finally {
     delete process.env.FT_DATA_DIR;
@@ -147,6 +172,7 @@ test('runHybridSearch returns mixed-source topic results and dedupes shared twee
     assert.equal(result.results[0].sourceCount, 2);
     assert.equal(result.results.filter((item) => item.tweetId === 'shared-1').length, 1);
     assert.ok(result.results.some((item) => item.source === 'feed'));
+    assert.ok(result.results.some((item) => item.source === 'accounts'));
   });
 });
 
@@ -162,11 +188,28 @@ test('runHybridSearch supports natural-language queries and action ranking', asy
     assert.equal(result.results[0].id, 'shared-1');
     assert.equal(result.results[0].isBookmarked, true);
     assert.equal(result.results[0].isLiked, true);
+    assert.equal(typeof result.results[0].isTrackedAccount, 'boolean');
     assert.equal(result.results[0].sourceDates.bookmarks, '2026-04-01T00:00:00Z');
     assert.equal(result.results[0].sourceDates.likes, '2026-04-02T00:00:00Z');
     assert.match(result.summary ?? '', /Top results|Claude|local/i);
     assert.equal(result.usedEngine, false);
     assert.deepEqual(result.expansions, []);
+  });
+});
+
+test('runHybridSearch can scope results to tracked account timelines', async () => {
+  await withHybridArchiveData(async () => {
+    const result = await runHybridSearch({
+      query: 'tracked account workflows',
+      scope: 'accounts',
+      limit: 10,
+    });
+
+    assert.equal(result.results.length, 1);
+    assert.equal(result.results[0].source, 'accounts');
+    assert.deepEqual(result.results[0].sources, ['accounts']);
+    assert.equal(result.results[0].isTrackedAccount, true);
+    assert.equal(result.results[0].tweetId, 'account-1');
   });
 });
 

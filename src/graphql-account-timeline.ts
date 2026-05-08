@@ -23,6 +23,7 @@ const USER_BY_SCREEN_NAME_OPERATION = 'UserByScreenName';
 const USER_TWEETS_AND_REPLIES_QUERY_ID = '6fWQaBPK51aGyC_VC7t9GQ';
 const USER_TWEETS_AND_REPLIES_OPERATION = 'UserTweets';
 const STALE_PAGE_LIMIT = 1;
+const TIMELINE_PAGE_RETRY_DELAYS_MS = [1_000, 3_000, 8_000];
 
 const USER_LOOKUP_FEATURES = {
   highlights_tweets_tab_ui_enabled: true,
@@ -79,6 +80,7 @@ export interface ResolvedAccount {
 export interface AccountTimelineSyncOptions extends XSessionOptions {
   limit?: number;
   retain?: string;
+  backfillAll?: boolean;
   onProgress?: (status: { fetched: number; added: number; pruned: number; pages: number }) => void;
 }
 
@@ -416,21 +418,101 @@ function updateState(prev: AccountTimelineState, input: {
   };
 }
 
-async function fetchTimelinePage(sessionOptions: XSessionOptions, userId: string, count: number, cursor?: string): Promise<AccountTimelinePageResult> {
+async function persistAccountTimelineRun(input: {
+  account: ResolvedAccount;
+  cachePath: string;
+  metaPath: string;
+  statePath: string;
+  previousMeta?: AccountTimelineCacheMeta;
+  previousState: AccountTimelineState;
+  records: AccountTimelineRecord[];
+  retain: string;
+  added: number;
+  pruned: number;
+  fetched: number;
+  stopReason: string;
+  cursor?: string;
+  now: string;
+}): Promise<{ latest?: AccountTimelineRecord; latestChanged: boolean }> {
+  const latest = input.records[0];
+  const latestChanged = input.previousMeta?.latestTweetId ? input.previousMeta.latestTweetId !== latest?.tweetId : Boolean(latest);
+
+  await ensureDir(path.dirname(input.cachePath));
+  await writeJsonLines(input.cachePath, input.records);
+  await writeJson(input.metaPath, {
+    provider: 'twitter',
+    schemaVersion: 1,
+    targetUserId: input.account.userId,
+    targetHandle: input.account.handle,
+    targetName: input.account.name,
+    lastSyncAt: input.now,
+    retention: input.retain,
+    totalItems: input.records.length,
+    latestTweetId: latest?.tweetId,
+    latestTweetPostedAt: latest?.postedAt ?? null,
+    latestChanged,
+  } satisfies AccountTimelineCacheMeta);
+  await writeJson(input.statePath, updateState(input.previousState, {
+    targetUserId: input.account.userId,
+    targetHandle: input.account.handle,
+    added: input.added,
+    pruned: input.pruned,
+    totalFetched: input.fetched,
+    totalStored: input.records.length,
+    latestTweetId: latest?.tweetId,
+    latestTweetPostedAt: latest?.postedAt ?? null,
+    latestChanged,
+    seenIds: input.records.slice(0, 20).map((record) => record.tweetId),
+    stopReason: input.stopReason,
+    lastCursor: input.cursor,
+    lastRunAt: input.now,
+  }));
+
+  return { latest, latestChanged };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shouldRetryTimelinePageError(error: unknown): boolean {
+  return error instanceof XRequestError && ['network', 'unknown', 'upstream', 'rate_limit'].includes(error.kind);
+}
+
+async function fetchTimelinePageOnce(sessionOptions: XSessionOptions, userId: string, count: number, cursor?: string): Promise<AccountTimelinePageResult> {
   const session = resolveXSessionAuth(sessionOptions);
   const response = await fetchXResource(buildTimelineUrl(userId, count, cursor), {
     headers: buildXGraphqlHeaders(session),
   });
   if (!response.ok) {
     const text = await response.text();
+    const isAuthFailure = response.status === 401 || response.status === 403;
+    const isRateLimited = response.status === 429;
     throw new XRequestError(
-      response.status === 401 || response.status === 403
+      isAuthFailure
         ? `Account timeline unauthorized (${response.status}). Refresh your X session in the browser and retry.`
+        : isRateLimited
+          ? `Account timeline rate limited (${response.status}). Run again later to continue from the saved checkpoint.`
         : `Account timeline request failed (${response.status}). Response: ${text.slice(0, 300)}`,
-      { kind: response.status === 401 || response.status === 403 ? 'auth' : 'upstream', status: response.status },
+      { kind: isAuthFailure ? 'auth' : isRateLimited ? 'rate_limit' : 'upstream', status: response.status },
     );
   }
   return parseAccountTimelineResponse(await response.json(), { targetUserId: userId });
+}
+
+async function fetchTimelinePage(sessionOptions: XSessionOptions, userId: string, count: number, cursor?: string): Promise<AccountTimelinePageResult> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= TIMELINE_PAGE_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return await fetchTimelinePageOnce(sessionOptions, userId, count, cursor);
+    } catch (error) {
+      lastError = error;
+      const delay = TIMELINE_PAGE_RETRY_DELAYS_MS[attempt];
+      if (delay == null || !shouldRetryTimelinePageError(error)) break;
+      await sleep(delay);
+    }
+  }
+  throw lastError;
 }
 
 export async function syncAccountTimelineGraphQL(handle: string, options: AccountTimelineSyncOptions = {}): Promise<AccountTimelineSyncResult> {
@@ -468,21 +550,34 @@ export async function syncAccountTimelineGraphQL(handle: string, options: Accoun
   let pruned = 0;
   let pages = 0;
   let stalePages = 0;
-  let cursor: string | undefined;
+  let cursor: string | undefined = options.backfillAll && previousState.stopReason !== 'end of timeline'
+    ? previousState.lastCursor
+    : undefined;
   let stopReason = 'unknown';
+  let latest: AccountTimelineRecord | undefined;
+  let latestChanged = false;
 
   while (fetched < limit) {
     const count = Math.min(40, limit - fetched);
-    const page = await fetchTimelinePage(options, account.userId, count, cursor);
+    let page: AccountTimelinePageResult;
+    try {
+      page = await fetchTimelinePage(options, account.userId, count, cursor);
+    } catch (error) {
+      if (error instanceof XRequestError && error.kind === 'rate_limit') {
+        stopReason = 'rate limit exceeded';
+        break;
+      }
+      throw error;
+    }
     pages += 1;
-    const now = new Date().toISOString();
-    const records = page.records.map((record) => ({ ...record, syncedAt: now, targetHandle: account.handle, targetName: account.name }));
+    const pageSyncedAt = new Date().toISOString();
+    const records = page.records.map((record) => ({ ...record, syncedAt: pageSyncedAt, targetHandle: account.handle, targetName: account.name }));
     fetched += records.length;
     const merge = mergeAccountTimelineRecords(merged, records);
     merged = merge.merged;
     added += merge.added;
 
-    if (merge.added === 0) {
+    if (!options.backfillAll && merge.added === 0) {
       stalePages += 1;
       if (stalePages >= STALE_PAGE_LIMIT) {
         stopReason = 'no new tweets (stale)';
@@ -493,9 +588,34 @@ export async function syncAccountTimelineGraphQL(handle: string, options: Accoun
     }
     if (!page.nextCursor) {
       stopReason = 'end of timeline';
-      break;
+    } else {
+      cursor = page.nextCursor;
     }
-    cursor = page.nextCursor;
+
+    const now = new Date().toISOString();
+    const prunedResult = pruneByRetention(merged, retentionMs, now);
+    merged = prunedResult.records;
+    pruned += prunedResult.pruned;
+    const persisted = await persistAccountTimelineRun({
+      account,
+      cachePath,
+      metaPath,
+      statePath,
+      previousMeta,
+      previousState,
+      records: merged,
+      retain,
+      added,
+      pruned,
+      fetched,
+      stopReason: stopReason === 'unknown' ? 'checkpoint' : stopReason,
+      cursor,
+      now,
+    });
+    latest = persisted.latest;
+    latestChanged = persisted.latestChanged;
+
+    if (stopReason === 'end of timeline' || stopReason === 'no new tweets (stale)') break;
   }
 
   if (stopReason === 'unknown') stopReason = fetched >= limit ? 'limit reached' : 'unknown';
@@ -503,40 +623,25 @@ export async function syncAccountTimelineGraphQL(handle: string, options: Accoun
   const now = new Date().toISOString();
   const prunedResult = pruneByRetention(merged, retentionMs, now);
   merged = prunedResult.records;
-  pruned = prunedResult.pruned;
-  const latest = merged[0];
-  const latestChanged = previousMeta?.latestTweetId ? previousMeta.latestTweetId !== latest?.tweetId : Boolean(latest);
-
-  await ensureDir(path.dirname(cachePath));
-  await writeJsonLines(cachePath, merged);
-  await writeJson(metaPath, {
-    provider: 'twitter',
-    schemaVersion: 1,
-    targetUserId: account.userId,
-    targetHandle: account.handle,
-    targetName: account.name,
-    lastSyncAt: now,
-    retention: retain,
-    totalItems: merged.length,
-    latestTweetId: latest?.tweetId,
-    latestTweetPostedAt: latest?.postedAt ?? null,
-    latestChanged,
-  } satisfies AccountTimelineCacheMeta);
-  await writeJson(statePath, updateState(previousState, {
-    targetUserId: account.userId,
-    targetHandle: account.handle,
+  pruned += prunedResult.pruned;
+  const persisted = await persistAccountTimelineRun({
+    account,
+    cachePath,
+    metaPath,
+    statePath,
+    previousMeta,
+    previousState,
+    records: merged,
+    retain,
     added,
     pruned,
-    totalFetched: fetched,
-    totalStored: merged.length,
-    latestTweetId: latest?.tweetId,
-    latestTweetPostedAt: latest?.postedAt ?? null,
-    latestChanged,
-    seenIds: merged.slice(0, 20).map((record) => record.tweetId),
+    fetched,
     stopReason,
-    lastCursor: cursor,
-    lastRunAt: now,
-  }));
+    cursor,
+    now,
+  });
+  latest = persisted.latest;
+  latestChanged = persisted.latestChanged;
   await rememberAccountHandle({
     userId: account.userId,
     handle: account.handle,

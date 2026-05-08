@@ -1,6 +1,8 @@
 import { openDb } from './db.js';
 import { twitterArchiveIndexPath } from './paths.js';
 import { rebuildArchiveStoreFromCaches } from './archive-store.js';
+import { readAccountRegistry } from './account-registry.js';
+import { searchAccountTimeline } from './account-timeline-db.js';
 import type {
   HybridSearchMode,
   HybridSearchResponse,
@@ -43,7 +45,7 @@ interface CandidateAccumulator {
   lexicalScore: number;
 }
 
-const SOURCE_PRIORITY: HybridSearchSource[] = ['bookmarks', 'likes', 'feed'];
+const SOURCE_PRIORITY: HybridSearchSource[] = ['bookmarks', 'likes', 'feed', 'accounts'];
 
 function tokenizeQuery(query: string): string[] {
   return Array.from(new Set(
@@ -80,7 +82,7 @@ function parseSources(value: unknown): HybridSearchSource[] {
       if (entry === 'bookmark') return ['bookmarks'];
       if (entry === 'like') return ['likes'];
       if (entry === 'feed') return ['feed'];
-      if (entry === 'bookmarks' || entry === 'likes') return [entry];
+      if (entry === 'bookmarks' || entry === 'likes' || entry === 'accounts') return [entry];
       return [];
     });
   } catch {
@@ -89,6 +91,7 @@ function parseSources(value: unknown): HybridSearchSource[] {
 }
 
 function singularSource(scope: Exclude<HybridSearchScope, 'all'>): 'bookmark' | 'like' | 'feed' {
+  if (scope === 'accounts') throw new Error('Account timelines are not stored in the canonical archive index.');
   if (scope === 'bookmarks') return 'bookmark';
   if (scope === 'likes') return 'like';
   return 'feed';
@@ -274,6 +277,43 @@ function buildFallbackSummary(results: HybridSearchResult[]): string {
   return `Top results cluster around ${sources || 'the local archive'}${authors ? `, with repeated authors like ${authors}` : ''}.`;
 }
 
+async function searchAccountCandidates(
+  probe: string,
+  scope: HybridSearchScope,
+  limit: number,
+): Promise<Array<ArchiveCandidateRow & { sourceDates: Partial<Record<HybridSearchSource, string | null>> }>> {
+  if (scope !== 'all' && scope !== 'accounts') return [];
+  const registry = await readAccountRegistry();
+  const candidates: Array<ArchiveCandidateRow & { sourceDates: Partial<Record<HybridSearchSource, string | null>> }> = [];
+
+  for (const entry of Object.values(registry.byUserId ?? {})) {
+    try {
+      const results = await searchAccountTimeline(entry.userId, { query: probe, limit });
+      candidates.push(...results.map((item) => {
+        const sourceDate = item.postedAt ?? item.syncedAt ?? null;
+        return {
+          id: item.id,
+          tweetId: item.tweetId,
+          url: item.url,
+          text: item.text,
+          authorHandle: item.authorHandle,
+          authorName: item.authorName,
+          postedAt: item.postedAt ?? null,
+          sources: ['accounts'] as HybridSearchSource[],
+          sourceDates: { accounts: sourceDate },
+          score: item.score,
+        };
+      }));
+    } catch (error) {
+      const message = (error as Error).message ?? '';
+      if (message.includes('Account index not built yet') || message.includes('no such file')) continue;
+      throw error;
+    }
+  }
+
+  return candidates;
+}
+
 async function summarizeResults(
   _query: string,
   _mode: HybridSearchMode,
@@ -301,14 +341,15 @@ export async function runHybridSearch(options: HybridSearchOptions): Promise<Hyb
     };
   }
 
-  await ensureArchiveIndex();
+  if (scope !== 'accounts') await ensureArchiveIndex();
   const probes = buildLocalProbes(query).slice(0, 8);
   const candidateMap = new Map<string, CandidateAccumulator>();
 
   for (const probe of probes) {
     if (!probe) continue;
-    const results = await searchArchiveCandidates(probe, scope, perProbeLimit);
-    results.forEach((result) => registerCandidate(candidateMap, {
+    const archiveResults = scope === 'accounts' ? [] : await searchArchiveCandidates(probe, scope, perProbeLimit);
+    const accountResults = await searchAccountCandidates(probe, scope, perProbeLimit);
+    [...archiveResults, ...accountResults].forEach((result) => registerCandidate(candidateMap, {
       ...result,
       probe,
     }));
@@ -326,6 +367,7 @@ export async function runHybridSearch(options: HybridSearchOptions): Promise<Hyb
     const isBookmarked = candidate.sources.has('bookmarks');
     const isLiked = candidate.sources.has('likes');
     const isInFeed = candidate.sources.has('feed');
+    const isTrackedAccount = candidate.sources.has('accounts');
     const coverageBoost = candidate.matchedQueries.size * 0.18;
     const breadthBoost = Math.max(0, sources.length - 1) * 0.22;
     const authorBoost = candidate.authorHandle && preferredAuthors.has(candidate.authorHandle) && !isBookmarked && !isLiked
@@ -357,6 +399,7 @@ export async function runHybridSearch(options: HybridSearchOptions): Promise<Hyb
       isBookmarked,
       isLiked,
       isInFeed,
+      isTrackedAccount,
       sourceCount: sources.length,
     };
   });

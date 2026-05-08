@@ -37,7 +37,7 @@ import {
   formatLikeSearchResults,
 } from './likes-db.js';
 import { buildFeedIndex, listFeed, getFeedById, searchFeed } from './feed-db.js';
-import { listAccountTimeline, getAccountTimelineById } from './account-timeline-db.js';
+import { listAccountTimeline, getAccountTimelineById, searchAccountTimeline } from './account-timeline-db.js';
 import { exportAccountTimeline } from './account-export.js';
 import { runHybridSearch } from './hybrid-search.js';
 import type { HybridSearchMode, HybridSearchResult, HybridSearchScope } from './search-types.js';
@@ -189,6 +189,7 @@ const FRIENDLY_STOP_REASONS: Record<string, string> = {
   'no tweet entries found': 'Sync complete \u2014 no supported tweet entries were returned.',
   'max runtime reached': 'Paused after 30 minutes. Run again to continue.',
   'max pages reached': 'Paused after reaching page limit. Run again to continue.',
+  'rate limit exceeded': 'Paused after X rate limiting. Run again later to continue from the saved checkpoint.',
   'target additions reached': 'Reached target bookmark count.',
 };
 
@@ -282,6 +283,10 @@ function formatFeedSearchResults(results: Array<{
       return `${index + 1}. [${date}] ${author}\n   ${text}\n   ${result.url}`;
     })
     .join('\n\n');
+}
+
+function snippetText(text: string, maxLength: number): string {
+  return text.length > maxLength ? `${text.slice(0, Math.max(0, maxLength - 3))}...` : text;
 }
 
 function formatAnalysisList(results: Array<{
@@ -1036,10 +1041,10 @@ export function buildCli() {
 
   program
     .command('search-all')
-    .description('Hybrid search across feed, likes, and bookmarks')
+    .description('Hybrid search across feed, likes, bookmarks, and tracked accounts')
     .argument('<query>', 'Search query in plain language or keywords')
     .option('--mode <mode>', 'Ranking mode: topic or action', 'topic')
-    .option('--scope <scope>', 'Scope: all, bookmarks, likes, or feed', 'all')
+    .option('--scope <scope>', 'Scope: all, bookmarks, likes, feed, or accounts', 'all')
     .option('--limit <n>', 'Max results', (v: string) => Number(v), 20)
     .option('--summary', 'Add a result-set summary after the ranked items')
     .option('--json', 'JSON output')
@@ -1050,8 +1055,8 @@ export function buildCli() {
       }
       const mode = rawMode as HybridSearchMode;
       const rawScope = String(options.scope ?? 'all');
-      if (!['all', 'bookmarks', 'likes', 'feed'].includes(rawScope)) {
-        throw new Error(`Invalid search scope: "${rawScope}". Use "all", "bookmarks", "likes", or "feed".`);
+      if (!['all', 'bookmarks', 'likes', 'feed', 'accounts'].includes(rawScope)) {
+        throw new Error(`Invalid search scope: "${rawScope}". Use "all", "bookmarks", "likes", "feed", or "accounts".`);
       }
       const scope = rawScope as HybridSearchScope;
       const result = await runHybridSearch({
@@ -2456,6 +2461,7 @@ export function buildCli() {
     .argument('<handle>', 'Public X handle, with or without @')
     .option('--limit <n>', 'Max tweets to fetch this run', (v: string) => Number(v), 50)
     .option('--retain <value>', 'Retention window like 90d, 24h, or 180m', '90d')
+    .option('--backfill-all', 'Keep paging older tweets even when the newest page has no additions')
     .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
     .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
     .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
@@ -2466,6 +2472,7 @@ export function buildCli() {
       const result = await syncAccountTimelineGraphQL(handle, {
         limit: Number(options.limit) || 50,
         retain: String(options.retain ?? '90d'),
+        backfillAll: Boolean(options.backfillAll),
         ...resolveBrowserSessionOptions(options),
       });
 
@@ -2481,25 +2488,32 @@ export function buildCli() {
 
   accounts
     .command('export')
-    .description('Export cached tweets for one tracked account as JSON')
+    .description('Export cached tweets for one tracked account')
     .argument('<handle>', 'Tracked handle, with or without @')
     .option('--after <date>', 'Posted after (YYYY-MM-DD)')
     .option('--before <date>', 'Posted before (YYYY-MM-DD)')
+    .option('--format <format>', 'Output format: json or jsonl', 'json')
     .option('--out <path>', 'Write JSON to this file instead of stdout')
     .action(safe(async (handle: string, options) => {
+      const format = String(options.format ?? 'json').toLowerCase();
+      if (format !== 'json' && format !== 'jsonl') {
+        throw new Error(`Invalid export format: "${format}". Use "json" or "jsonl".`);
+      }
       const payload = await exportAccountTimeline(handle, {
         after: options.after ? String(options.after) : undefined,
         before: options.before ? String(options.before) : undefined,
       });
-      const json = JSON.stringify(payload, null, 2);
+      const output = format === 'jsonl'
+        ? payload.items.map((item) => JSON.stringify(item)).join('\n')
+        : JSON.stringify(payload, null, 2);
       if (!options.out) {
-        console.log(json);
+        console.log(output);
         return;
       }
 
       const outputPath = path.resolve(String(options.out));
       fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-      fs.writeFileSync(outputPath, `${json}\n`);
+      fs.writeFileSync(outputPath, output ? `${output}\n` : '');
       console.log(`\n  Exported ${payload.count} tweets for @${payload.account.handle}`);
       console.log(`  Output: ${outputPath}\n`);
     }));
@@ -2539,6 +2553,106 @@ export function buildCli() {
         console.log(`  ${item.url}`);
         console.log();
       }
+    }));
+
+  accounts
+    .command('search')
+    .description('Full-text search cached tweets for one tracked account')
+    .argument('<handle>', 'Tracked handle, with or without @')
+    .argument('<query>', 'Search query (supports FTS5 syntax: AND, OR, NOT, "exact phrase")')
+    .option('--after <date>', 'Posted after (YYYY-MM-DD)')
+    .option('--before <date>', 'Posted before (YYYY-MM-DD)')
+    .option('--limit <n>', 'Max results', (v: string) => Number(v), 20)
+    .option('--json', 'JSON output')
+    .action(safe(async (handle: string, query: string, options) => {
+      const account = await requireAccountIndex(handle);
+      if (!account) return;
+      const results = await searchAccountTimeline(account.userId, {
+        query,
+        after: options.after ? String(options.after) : undefined,
+        before: options.before ? String(options.before) : undefined,
+        limit: Number(options.limit) || 20,
+      });
+      if (options.json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+      if (results.length === 0) {
+        console.log('No results found.');
+        return;
+      }
+      for (const item of results) {
+        const summary = item.text.length > 180 ? `${item.text.slice(0, 177)}...` : item.text;
+        console.log(`${item.id}  ${item.authorHandle ? `@${item.authorHandle}` : '@?'}  ${(item.postedAt ?? item.syncedAt)?.slice(0, 10) ?? '?'}`);
+        console.log(`  ${summary}`);
+        console.log(`  ${item.url}`);
+        console.log();
+      }
+    }));
+
+  accounts
+    .command('brief')
+    .description('Create a local evidence brief from cached tweets for one tracked account')
+    .argument('<handle>', 'Tracked handle, with or without @')
+    .argument('<topic>', 'Topic/search query to brief')
+    .option('--after <date>', 'Posted after (YYYY-MM-DD)')
+    .option('--before <date>', 'Posted before (YYYY-MM-DD)')
+    .option('--limit <n>', 'Max evidence items', (v: string) => Number(v), 8)
+    .option('--json', 'JSON output')
+    .action(safe(async (handle: string, topic: string, options) => {
+      const account = await requireAccountIndex(handle);
+      if (!account) return;
+      const items = await searchAccountTimeline(account.userId, {
+        query: topic,
+        after: options.after ? String(options.after) : undefined,
+        before: options.before ? String(options.before) : undefined,
+        limit: Number(options.limit) || 8,
+      });
+      const payload = {
+        account: {
+          userId: account.userId,
+          handle: account.currentHandle,
+          name: account.name,
+        },
+        topic,
+        filters: {
+          after: options.after ? String(options.after) : undefined,
+          before: options.before ? String(options.before) : undefined,
+        },
+        count: items.length,
+        items: items.map((item) => ({
+          tweetId: item.tweetId,
+          url: item.url,
+          text: item.text,
+          postedAt: item.postedAt ?? null,
+          authorHandle: item.authorHandle,
+          score: item.score,
+        })),
+        summary: items.length === 0
+          ? 'No matching cached tweets were found for this topic.'
+          : `Found ${items.length} cached tweet${items.length === 1 ? '' : 's'} matching "${topic}". Treat this as an evidence list, not an LLM-generated investment conclusion.`,
+      };
+
+      if (options.json) {
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+      }
+
+      console.log(`Account brief: @${payload.account.handle}`);
+      console.log(`Topic: ${topic}`);
+      if (payload.filters.after || payload.filters.before) {
+        console.log(`Window: ${payload.filters.after ?? '...'} to ${payload.filters.before ?? '...'}`);
+      }
+      console.log(payload.summary);
+      if (items.length === 0) return;
+      console.log('\nEvidence');
+      items.forEach((item, index) => {
+        const date = (item.postedAt ?? item.syncedAt)?.slice(0, 10) ?? '?';
+        const author = item.authorHandle ? `@${item.authorHandle}` : '@?';
+        console.log(`${index + 1}. [${date}] ${author}`);
+        console.log(`   ${snippetText(item.text, 220)}`);
+        console.log(`   ${item.url}`);
+      });
     }));
 
   accounts
@@ -2796,7 +2910,8 @@ export function buildCli() {
     .description('Fetch replies/comments for recent cached feed items')
     .option('--limit <n>', 'How many recent feed items to expand', (v: string) => Number(v), 10)
     .option('--tweet-id <id>', 'Only collect context for one cached feed item')
-    .option('--max-replies <n>', 'Maximum replies/comments to store per feed item', (v: string) => Number(v), 40)
+    .option('--max-replies <n>', 'Maximum replies/comments to store per feed item; use 0 for no reply cap', (v: string) => Number(v), 40)
+    .option('--max-pages <n>', 'Maximum search result pages to fetch per feed item; use 0 for no page cap', (v: string) => Number(v), 0)
     .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
     .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
     .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
@@ -2808,7 +2923,8 @@ export function buildCli() {
       const result = await syncFeedConversationContext({
         limit: options.tweetId ? undefined : (Number(options.limit) || 10),
         tweetId: options.tweetId ? String(options.tweetId) : undefined,
-        maxReplies: Number(options.maxReplies) || 40,
+        maxReplies: Number.isFinite(Number(options.maxReplies)) ? Number(options.maxReplies) : 40,
+        maxPages: Number.isFinite(Number(options.maxPages)) ? Number(options.maxPages) : 0,
         ...resolveBrowserSessionOptions(options),
       });
 
