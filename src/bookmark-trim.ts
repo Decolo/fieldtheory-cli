@@ -27,7 +27,9 @@ export interface TrimBookmarksOptions extends XSessionOptions {
   keep: number;
   batchSize: number;
   pauseSeconds: number;
+  /** @deprecated 429 responses are terminal for account-safety reasons. */
   rateLimitBackoffSeconds?: number;
+  /** @deprecated 429 responses are terminal for account-safety reasons. */
   maxRateLimitRetries?: number;
   onProgress?: (progress: BookmarkTrimProgress) => void;
   sleep?: (ms: number) => Promise<void>;
@@ -105,7 +107,6 @@ export async function trimBookmarks(options: TrimBookmarksOptions): Promise<Trim
     1,
     Math.trunc(options.rateLimitBackoffSeconds ?? Math.max(pauseSeconds, 300)),
   );
-  const maxRateLimitRetries = Math.max(0, Math.trunc(options.maxRateLimitRetries ?? 3));
   const plan = await planBookmarksTrim(keep);
 
   if (plan.removeCount === 0) {
@@ -129,56 +130,37 @@ export async function trimBookmarks(options: TrimBookmarksOptions): Promise<Trim
     const succeededIds: string[] = [];
 
     for (const tweetId of batch) {
-      let attempts = 0;
+      options.onProgress?.({
+        batchNumber: index + 1,
+        batchTotal: batches.length,
+        completed,
+        totalToRemove: plan.removeCount,
+        currentTweetId: tweetId,
+      });
 
-      while (true) {
-        options.onProgress?.({
-          batchNumber: index + 1,
-          batchTotal: batches.length,
-          completed,
-          totalToRemove: plan.removeCount,
-          currentTweetId: tweetId,
-        });
+      try {
+        await unbookmarkTweet(tweetId, options);
+        succeededIds.push(tweetId);
+        completed += 1;
+      } catch (error) {
+        const isRateLimited = error instanceof RemoteTweetActionError && error.status === 429;
 
-        try {
-          await unbookmarkTweet(tweetId, options);
-          succeededIds.push(tweetId);
-          completed += 1;
-          break;
-        } catch (error) {
-          const isRateLimited = error instanceof RemoteTweetActionError && error.status === 429;
-          if (isRateLimited && attempts < maxRateLimitRetries) {
-            attempts += 1;
-            options.onProgress?.({
-              batchNumber: index + 1,
-              batchTotal: batches.length,
-              completed,
-              totalToRemove: plan.removeCount,
-              currentTweetId: tweetId,
-              pausedSeconds: rateLimitBackoffSeconds,
-            });
-            await sleep(rateLimitBackoffSeconds * 1000);
-            continue;
-          }
-
-          if (succeededIds.length > 0) {
-            lastArchiveState = await removeBookmarksFromArchive(succeededIds);
-          }
-
-          if (isRateLimited) {
-            throw new BookmarkTrimRateLimitError(
-              `Rate limited after ${completed}/${plan.removeCount} removals.\n` +
-              `Retry after ${rateLimitBackoffSeconds}s or rerun the command later.\n` +
-              `${(error as Error).message}`,
-              rateLimitBackoffSeconds,
-            );
-          }
-
-          const prefix = succeededIds.length > 0
-            ? `Processed ${completed}/${plan.removeCount} bookmarks before stopping.\n`
-            : '';
-          throw new Error(`${prefix}${(error as Error).message}`);
+        if (succeededIds.length > 0) {
+          lastArchiveState = await removeBookmarksFromArchive(succeededIds);
         }
+
+        if (isRateLimited) {
+          throw new BookmarkTrimRateLimitError(
+            `Rate limited after ${completed}/${plan.removeCount} removals. Stopping immediately; no retry was attempted.\n` +
+            `${(error as Error).message}`,
+            rateLimitBackoffSeconds,
+          );
+        }
+
+        const prefix = succeededIds.length > 0
+          ? `Processed ${completed}/${plan.removeCount} bookmarks before stopping.\n`
+          : '';
+        throw new Error(`${prefix}${(error as Error).message}`);
       }
     }
 
