@@ -79,7 +79,8 @@ const BOOKMARK_MUTATION: MutationSpec = {
 
 function shouldRetryActionFailure(error: RemoteTweetActionError): boolean {
   if (error.retryable) return true;
-  if (error.kind === 'network' || error.kind === 'rate_limit') return true;
+  if (error.kind === 'rate_limit' || error.status === 429) return false;
+  if (error.kind === 'network') return true;
   if (typeof error.status === 'number' && error.status >= 500) return true;
   return false;
 }
@@ -112,7 +113,7 @@ function buildHttpActionError(
   responseText: string,
   attempts: number,
 ): RemoteTweetActionError {
-  const retryable = status === 429 || status >= 500;
+  const retryable = status >= 500;
   const isBookmarkCreate404 = spec === BOOKMARK_MUTATION && status === 404;
   const kind = classifyHttpStatus(status);
   const attemptText = retryable ? ` after ${attempts} attempt${attempts === 1 ? '' : 's'}` : '';
@@ -148,7 +149,7 @@ function normalizeActionError(spec: MutationSpec, error: unknown, attempts: numb
         status: error.status,
         kind: error.kind,
         attempts,
-        retryable: error.kind === 'network' || error.kind === 'rate_limit' || (typeof error.status === 'number' && error.status >= 500),
+        retryable: error.kind === 'network' || (typeof error.status === 'number' && error.status >= 500),
       },
     );
   }

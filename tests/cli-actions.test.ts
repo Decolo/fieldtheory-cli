@@ -537,7 +537,7 @@ test('ft feed trim keeps the newest feed items locally', async () => {
   }
 });
 
-test('ft likes trim retries a 429 before succeeding', async () => {
+test('ft likes trim stops immediately on 429 without retrying or removing local records', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-cli-trim-429-'));
   process.env.FT_DATA_DIR = dir;
 
@@ -563,14 +563,8 @@ test('ft likes trim retries a 429 before succeeding', async () => {
   let requests = 0;
   const server = http.createServer(async (_req, res) => {
     requests += 1;
-    if (requests === 1) {
-      res.writeHead(429, { 'content-type': 'text/plain' });
-      res.end('Rate limit exceeded');
-      return;
-    }
-
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ data: { unfavorite_tweet: 'Done' } }));
+    res.writeHead(429, { 'content-type': 'text/plain' });
+    res.end('Rate limit exceeded');
   });
 
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
@@ -587,29 +581,31 @@ test('ft likes trim retries a 429 before succeeding', async () => {
     await buildLikesIndex({ force: true });
 
     const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
-    const { stdout } = await execFileAsync(
-      tsx,
-      [
-        'src/cli.ts',
-        'likes',
-        'trim',
-        '--keep', '1',
-        '--batch-size', '1',
-        '--pause-seconds', '0',
-        '--rate-limit-backoff-seconds', '1',
-        '--max-rate-limit-retries', '1',
-        '--cookies', 'ct0-token', 'auth',
-      ],
-      {
-        cwd: process.cwd(),
-        env: { ...process.env, FT_DATA_DIR: dir, FT_X_API_ORIGIN: `http://127.0.0.1:${address.port}` },
-      },
+    await assert.rejects(
+      execFileAsync(
+        tsx,
+        [
+          'src/cli.ts',
+          'likes',
+          'trim',
+          '--keep', '1',
+          '--batch-size', '1',
+          '--pause-seconds', '0',
+          '--rate-limit-backoff-seconds', '1',
+          '--max-rate-limit-retries', '1',
+          '--cookies', 'ct0-token', 'auth',
+        ],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, FT_DATA_DIR: dir, FT_X_API_ORIGIN: `http://127.0.0.1:${address.port}` },
+        },
+      ),
+      /Stopping immediately; no retry was attempted/i,
     );
 
-    assert.match(stdout, /Removed 1 old likes on X/);
-    assert.equal(requests, 2);
+    assert.equal(requests, 1);
     assert.ok(await getLikeById('l2'));
-    assert.equal(await getLikeById('l1'), null);
+    assert.ok(await getLikeById('l1'));
   } finally {
     delete process.env.FT_DATA_DIR;
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

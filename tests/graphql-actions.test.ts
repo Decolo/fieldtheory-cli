@@ -57,6 +57,29 @@ test('unbookmarkTweet maps auth failures to re-login guidance', async () => {
   }
 });
 
+test('unlikeTweet stops immediately on 429 without retrying', async () => {
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+
+  globalThis.fetch = (async () => {
+    requests += 1;
+    return new Response('too many requests', { status: 429 });
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      unlikeTweet('123', {
+        csrfToken: 'ct0-token',
+        cookieHeader: 'ct0=ct0-token; auth_token=auth',
+      }),
+      /Failed to unlike tweet \(429\)/i,
+    );
+    assert.equal(requests, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('likeTweet posts the current X web mutation with tweet_id variables', async () => {
   const originalFetch = globalThis.fetch;
   let requestUrl = '';
