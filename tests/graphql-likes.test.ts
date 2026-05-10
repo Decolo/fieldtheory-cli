@@ -7,6 +7,7 @@ import {
   convertLikedTweetToArchiveItem,
   convertLikedTweetToRecord,
   emitLikeArchiveItem,
+  fetchRemoteLikeIds,
   parseLikesResponse,
   mergeLikeRecord,
   mergeLikes,
@@ -263,6 +264,46 @@ test('syncLikesGraphQL: preserves previously archived likes absent from latest r
     globalThis.fetch = originalFetch;
     delete process.env.FT_DATA_DIR;
     await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('fetchRemoteLikeIds: returns the current remote like id set without touching local cache', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify(makeViewerResponse('viewer-1')), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (calls === 2) {
+      return new Response(JSON.stringify(
+        makeLikesTimelineResponse([
+          makeLikedTweet({ id_str: '200', full_text: 'first like' }),
+          makeLikedTweet({ id_str: '150', full_text: 'second like' }),
+        ], ''),
+      ), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    throw new Error(`Unexpected fetch call ${calls}`);
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchRemoteLikeIds({
+      csrfToken: 'ct0-token',
+      cookieHeader: 'ct0=ct0-token; auth_token=auth',
+      maxPages: 5,
+      delayMs: 0,
+    });
+    assert.deepEqual(result.ids.sort(), ['150', '200']);
+    assert.equal(result.pages, 1);
+    assert.equal(result.stopReason, 'end of likes');
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 

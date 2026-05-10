@@ -613,6 +613,160 @@ test('ft likes trim stops immediately on 429 without retrying or removing local 
   }
 });
 
+test('ft likes prune-remote-missing deletes only local likes absent from remote and does not write to X', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-cli-prune-remote-likes-'));
+  process.env.FT_DATA_DIR = dir;
+
+  const likes = [
+    {
+      ...LIKE_FIXTURE,
+      id: 'l3',
+      tweetId: 'l3',
+      likedAt: '2026-03-05T00:00:00Z',
+      url: 'https://x.com/bob/status/l3',
+      text: 'Still on remote',
+    },
+    {
+      ...LIKE_FIXTURE,
+      id: 'l2',
+      tweetId: 'l2',
+      likedAt: '2026-03-04T00:00:00Z',
+      url: 'https://x.com/bob/status/l2',
+      text: 'Still on remote too',
+    },
+    {
+      ...LIKE_FIXTURE,
+      id: 'l1',
+      tweetId: 'l1',
+      likedAt: '2026-03-03T00:00:00Z',
+      url: 'https://x.com/bob/status/l1',
+      text: 'Only local',
+    },
+  ];
+
+  const requests: string[] = [];
+  let requestCount = 0;
+  const remoteLikedTweet = (id: string, text: string) => ({
+    id_str: id,
+    full_text: text,
+    created_at: 'Tue Mar 10 12:00:00 +0000 2026',
+    user: {
+      screen_name: 'bob',
+      name: 'Bob',
+      profile_image_url_https: 'https://img.example.com/bob.jpg',
+    },
+    entities: { urls: [] },
+    extended_entities: { media: [] },
+  });
+  const server = http.createServer((_req, res) => {
+    requestCount += 1;
+    requests.push(_req.url ?? '');
+    if (requestCount === 1) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        data: {
+          viewer: {
+            user_results: {
+              result: { rest_id: 'viewer-1' },
+            },
+          },
+        },
+      }));
+      return;
+    }
+    if (requestCount === 2) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        data: {
+          user: {
+            result: {
+              timeline: {
+                timeline: {
+                  instructions: [
+                    {
+                      entries: [
+                        {
+                          entryId: 'tweet-l3',
+                          sortIndex: '2041895058709413888',
+                          content: {
+                            itemContent: {
+                              itemType: 'TimelineTweet',
+                              tweet_results: {
+                                result: remoteLikedTweet('l3', 'Still on remote'),
+                              },
+                            },
+                          },
+                        },
+                        {
+                          entryId: 'tweet-l2',
+                          sortIndex: '2041895058709413887',
+                          content: {
+                            itemContent: {
+                              itemType: 'TimelineTweet',
+                              tweet_results: {
+                                result: remoteLikedTweet('l2', 'Still on remote too'),
+                              },
+                            },
+                          },
+                        },
+                        {
+                          entryId: 'cursor-bottom',
+                          sortIndex: '1',
+                          content: {
+                            cursorType: 'Bottom',
+                            value: '',
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      }));
+      return;
+    }
+
+    res.writeHead(404).end('not found');
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Failed to bind mock prune server.');
+
+  try {
+    await writeFile(path.join(dir, 'likes.jsonl'), likes.map((row) => JSON.stringify(row)).join('\n') + '\n');
+    await writeJson(path.join(dir, 'likes-meta.json'), {
+      provider: 'twitter',
+      schemaVersion: 1,
+      totalLikes: 3,
+    });
+    await buildLikesIndex({ force: true });
+
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const { stdout } = await execFileAsync(
+      tsx,
+      ['src/cli.ts', 'likes', 'prune-remote-missing', '--max-pages', '5', '--delay-ms', '0', '--cookies', 'ct0-token', 'auth'],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, FT_DATA_DIR: dir, FT_X_API_ORIGIN: `http://127.0.0.1:${address.port}` },
+      },
+    );
+
+    assert.match(stdout, /Removed 1 local likes missing from remote/);
+    assert.ok(await getLikeById('l3'));
+    assert.ok(await getLikeById('l2'));
+    assert.equal(await getLikeById('l1'), null);
+    assert.equal(requests.some((url) => url.includes('UnfavoriteTweet')), false);
+  } finally {
+    delete process.env.FT_DATA_DIR;
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('ft likes unlike retries a transient 500 before succeeding', async () => {
   await withCliDataDir(async (dir) => {
     let requests = 0;

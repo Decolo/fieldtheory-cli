@@ -72,7 +72,7 @@ import { PromptCancelledError, promptText } from './prompt.js';
 import { readFeedConversationBundle } from './feed-context-store.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import { assertWebAssetsBuilt, startWebServer } from './web.js';
-import { trimLikes } from './likes-trim.js';
+import { pruneLocalLikesMissingRemotely, trimLikes } from './likes-trim.js';
 import { trimBookmarks } from './bookmark-trim.js';
 import { trimFeed } from './feed-trim.js';
 import { loadEnv, loadBookmarkAnalysisProviderConfig, loadLikeAnalysisProviderConfig } from './config.js';
@@ -1969,6 +1969,74 @@ export function buildCli() {
       console.log(`  ✓ Removed ${result.removed} old likes on X`);
       console.log(`  Remaining likes: ${result.totalAfter}`);
       if (result.keepBoundaryId) console.log(`  Oldest kept like: ${result.keepBoundaryId}`);
+      if (result.cachePath) console.log(`  Cache: ${result.cachePath}`);
+      if (result.dbPath) console.log(`  Index: ${result.dbPath}`);
+      console.log();
+    }));
+
+  likes
+    .command('prune-remote-missing')
+    .description('Delete local likes that no longer exist in the current X account likes; does not write to X')
+    .option('--max-pages <n>', 'Max pages to fetch from remote likes', (v: string) => Number(v), 500)
+    .option('--delay-ms <n>', 'Delay between remote read requests in ms', (v: string) => Number(v), 600)
+    .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 30)
+    .option('--browser <id>', 'Browser to read cookies from (chrome, brave, chromium, firefox)')
+    .option('--cookies <value...>', 'Pass cookies directly: <ct0> [auth_token]')
+    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Chrome-family profile directory name')
+    .option('--firefox-profile-dir <path>', 'Firefox profile directory path')
+    .action(safe(async (options) => {
+      if (!requireLikesData()) return;
+
+      let csrfToken: string | undefined;
+      let cookieHeader: string | undefined;
+      if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
+        csrfToken = String(options.cookies[0]);
+        const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
+        const parts = [`ct0=${csrfToken}`];
+        if (authToken) parts.push(`auth_token=${authToken}`);
+        cookieHeader = parts.join('; ');
+      }
+
+      console.log(`\n  Pruning local likes missing from remote X likes`);
+      console.log(`  Mode: read remote likes, delete local-only rows`);
+      console.log(`  Remote writes: disabled\n`);
+
+      const result = await pruneLocalLikesMissingRemotely({
+        maxPages: Number(options.maxPages) || 500,
+        delayMs: Number(options.delayMs) || 600,
+        maxMinutes: Number(options.maxMinutes) || 30,
+        browser: options.browser ? String(options.browser) : undefined,
+        csrfToken,
+        cookieHeader,
+        chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+        chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+        firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+        onProgress: (progress) => {
+          if (progress.phase === 'fetch-remote') {
+            process.stderr.write(
+              `  Reading remote likes · page ${progress.page ?? 0} · ${progress.remoteCount ?? 0} ids seen\n`,
+            );
+            return;
+          }
+          process.stderr.write(
+            `  Rewriting local likes cache · remote ids ${progress.remoteCount ?? 0}\n`,
+          );
+        },
+      });
+
+      if (result.removed === 0) {
+        console.log(`  No local-only likes found.`);
+        console.log(`  Local likes: ${result.localAfter}`);
+        console.log(`  Remote likes seen: ${result.remoteCount}`);
+        console.log(`  ${friendlyStopReason(result.stopReason)}\n`);
+        return;
+      }
+
+      console.log(`  ✓ Removed ${result.removed} local likes missing from remote`);
+      console.log(`  Local likes: ${result.localBefore} -> ${result.localAfter}`);
+      console.log(`  Remote likes seen: ${result.remoteCount}`);
+      console.log(`  ${friendlyStopReason(result.stopReason)}`);
       if (result.cachePath) console.log(`  Cache: ${result.cachePath}`);
       if (result.dbPath) console.log(`  Index: ${result.dbPath}`);
       console.log();

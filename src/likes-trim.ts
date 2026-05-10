@@ -1,5 +1,6 @@
 import { removeLikesFromArchive } from './archive-actions.js';
 import { readJsonLines } from './fs.js';
+import { fetchRemoteLikeIds, type RemoteLikeIdsOptions } from './graphql-likes.js';
 import { RemoteTweetActionError, unlikeTweet } from './graphql-actions.js';
 import { twitterLikesCachePath } from './paths.js';
 import type { LikeRecord } from './types.js';
@@ -45,6 +46,28 @@ export interface TrimLikesResult {
   firstRemovedId?: string;
   cachePath?: string;
   dbPath?: string;
+}
+
+export interface LikesRemotePruneProgress {
+  phase: 'fetch-remote' | 'rewrite-local';
+  page?: number;
+  remoteCount?: number;
+}
+
+export interface PruneLocalLikesMissingRemotelyOptions extends RemoteLikeIdsOptions {
+  onProgress?: (progress: LikesRemotePruneProgress) => void;
+}
+
+export interface PruneLocalLikesMissingRemotelyResult {
+  localBefore: number;
+  remoteCount: number;
+  removed: number;
+  localAfter: number;
+  removedIds: string[];
+  missingIds: string[];
+  cachePath?: string;
+  dbPath?: string;
+  stopReason: string;
 }
 
 export class LikesTrimRateLimitError extends Error {
@@ -190,5 +213,55 @@ export async function trimLikes(options: TrimLikesOptions): Promise<TrimLikesRes
     firstRemovedId: plan.firstRemoveId,
     cachePath: lastArchiveState?.cachePath,
     dbPath: lastArchiveState?.dbPath,
+  };
+}
+
+export async function pruneLocalLikesMissingRemotely(
+  options: PruneLocalLikesMissingRemotelyOptions = {},
+): Promise<PruneLocalLikesMissingRemotelyResult> {
+  const local = await readJsonLines<LikeRecord>(twitterLikesCachePath());
+
+  options.onProgress?.({ phase: 'fetch-remote', page: 0, remoteCount: 0 });
+  const remote = await fetchRemoteLikeIds({
+    ...options,
+    onProgress: (progress) => {
+      options.onProgress?.({
+        phase: 'fetch-remote',
+        page: progress.page,
+        remoteCount: progress.totalFetched,
+      });
+    },
+  });
+
+  const remoteIds = new Set(remote.ids);
+  const removalIds = local
+    .filter((record) => !remoteIds.has(record.tweetId))
+    .map((record) => record.tweetId);
+
+  if (removalIds.length === 0) {
+    return {
+      localBefore: local.length,
+      remoteCount: remote.ids.length,
+      removed: 0,
+      localAfter: local.length,
+      removedIds: [],
+      missingIds: [],
+      stopReason: remote.stopReason,
+    };
+  }
+
+  options.onProgress?.({ phase: 'rewrite-local', remoteCount: remote.ids.length });
+  const rewritten = await removeLikesFromArchive(removalIds);
+
+  return {
+    localBefore: local.length,
+    remoteCount: remote.ids.length,
+    removed: rewritten.removedIds.length,
+    localAfter: rewritten.totalRemaining,
+    removedIds: rewritten.removedIds,
+    missingIds: rewritten.missingIds,
+    cachePath: rewritten.cachePath,
+    dbPath: rewritten.dbPath,
+    stopReason: remote.stopReason,
   };
 }
