@@ -6,7 +6,7 @@ import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
 import { extractFirefoxXCookies } from './firefox-cookies.js';
 import { fetchTweetViaSyndication, type GapFillFailure, type GapFillProgress } from './graphql-bookmarks.js';
-import { fetchXResource } from './x-graphql.js';
+import { fetchXResource, xGraphqlOrigin } from './x-graphql.js';
 import type { ArchiveItem, LikeRecord, LikesBackfillState, LikesCacheMeta } from './types.js';
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
@@ -120,6 +120,22 @@ export interface LikesSyncResult {
   statePath: string;
 }
 
+export interface RemoteLikeIdsOptions extends LikesSyncOptions {}
+
+export interface RemoteLikeIdsProgress {
+  page: number;
+  totalFetched: number;
+  running: boolean;
+  done: boolean;
+  stopReason?: string;
+}
+
+export interface RemoteLikeIdsResult {
+  ids: string[];
+  pages: number;
+  stopReason: string;
+}
+
 interface LikesPageResult {
   records: LikeRecord[];
   nextCursor?: string;
@@ -199,7 +215,7 @@ function buildViewerUrl(): string {
     features: JSON.stringify(VIEWER_GRAPHQL_FEATURES),
     fieldToggles: JSON.stringify(VIEWER_GRAPHQL_FIELD_TOGGLES),
   });
-  return `https://x.com/i/api/graphql/${VIEWER_QUERY_ID}/${VIEWER_OPERATION}?${params}`;
+  return `${xGraphqlOrigin()}/i/api/graphql/${VIEWER_QUERY_ID}/${VIEWER_OPERATION}?${params}`;
 }
 
 function buildUrl(userId: string, cursor?: string): string {
@@ -214,7 +230,7 @@ function buildUrl(userId: string, cursor?: string): string {
     features: JSON.stringify(LIKES_GRAPHQL_FEATURES),
     fieldToggles: JSON.stringify(LIKES_GRAPHQL_FIELD_TOGGLES),
   });
-  return `https://x.com/i/api/graphql/${LIKES_QUERY_ID}/${LIKES_OPERATION}?${params}`;
+  return `${xGraphqlOrigin()}/i/api/graphql/${LIKES_QUERY_ID}/${LIKES_OPERATION}?${params}`;
 }
 
 function buildHeaders(csrfToken: string, cookieHeader?: string): Record<string, string> {
@@ -729,4 +745,90 @@ export async function syncLikesGraphQL(options: LikesSyncOptions = {}): Promise<
   });
 
   return { added: totalAdded, totalLikes: existing.length, pages: page, stopReason, cachePath, statePath };
+}
+
+export async function fetchRemoteLikeIds(options: RemoteLikeIdsOptions = {}): Promise<RemoteLikeIdsResult> {
+  const maxPages = options.maxPages ?? 500;
+  const delayMs = options.delayMs ?? 600;
+  const maxMinutes = options.maxMinutes ?? 30;
+
+  let csrfToken: string;
+  let cookieHeader: string | undefined;
+
+  if (options.csrfToken) {
+    csrfToken = options.csrfToken;
+    cookieHeader = options.cookieHeader;
+  } else {
+    const config = loadChromeSessionConfig({ browserId: options.browser });
+    if (config.browser.cookieBackend === 'firefox') {
+      const cookies = extractFirefoxXCookies(options.firefoxProfileDir);
+      csrfToken = cookies.csrfToken;
+      cookieHeader = cookies.cookieHeader;
+    } else {
+      const chromeDir = options.chromeUserDataDir ?? config.chromeUserDataDir;
+      const chromeProfile = options.chromeProfileDirectory ?? config.chromeProfileDirectory;
+      const cookies = extractChromeXCookies(chromeDir, chromeProfile, config.browser);
+      csrfToken = cookies.csrfToken;
+      cookieHeader = cookies.cookieHeader;
+    }
+  }
+
+  const started = Date.now();
+  let page = 0;
+  let cursor: string | undefined;
+  let stopReason = 'unknown';
+  const ids = new Set<string>();
+  const userId = await fetchViewerId(csrfToken, cookieHeader);
+
+  while (page < maxPages) {
+    if (Date.now() - started > maxMinutes * 60_000) {
+      stopReason = 'max runtime reached';
+      break;
+    }
+
+    const result = await fetchPageWithRetry(csrfToken, userId, cursor, cookieHeader);
+    page += 1;
+
+    if (result.records.length === 0) {
+      stopReason = 'end of likes';
+      break;
+    }
+
+    for (const record of result.records) {
+      ids.add(record.tweetId);
+    }
+
+    options.onProgress?.({
+      page,
+      totalFetched: ids.size,
+      newAdded: ids.size,
+      running: true,
+      done: false,
+    });
+
+    if (!result.nextCursor) {
+      stopReason = 'end of likes';
+      break;
+    }
+
+    cursor = result.nextCursor;
+    if (page < maxPages) await new Promise((r) => setTimeout(r, delayMs));
+  }
+
+  if (stopReason === 'unknown') stopReason = page >= maxPages ? 'max pages reached' : 'unknown';
+
+  options.onProgress?.({
+    page,
+    totalFetched: ids.size,
+    newAdded: ids.size,
+    running: false,
+    done: true,
+    stopReason,
+  });
+
+  return {
+    ids: Array.from(ids),
+    pages: page,
+    stopReason,
+  };
 }
