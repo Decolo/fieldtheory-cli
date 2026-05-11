@@ -6,7 +6,7 @@ import { loadChromeSessionConfig } from './config.js';
 import { extractChromeXCookies } from './chrome-cookies.js';
 import { extractFirefoxXCookies } from './firefox-cookies.js';
 import { parseTimestampMs } from './date-utils.js';
-import { fetchXResource } from './x-graphql.js';
+import { fetchXResource, xGraphqlOrigin } from './x-graphql.js';
 import type { ArchiveItem, BookmarkBackfillState, BookmarkCacheMeta, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText } from './bookmarks-db.js';
 
@@ -95,6 +95,26 @@ export interface SyncResult {
   stopReason: string;
   cachePath: string;
   statePath: string;
+}
+
+export interface RemoteBookmarkIdsResult {
+  ids: string[];
+  pages: number;
+  stopReason: string;
+}
+
+export interface RemoteBookmarkIdsOptions {
+  maxPages?: number;
+  delayMs?: number;
+  maxMinutes?: number;
+  pageSize?: number;
+  browser?: string;
+  chromeUserDataDir?: string;
+  chromeProfileDirectory?: string;
+  firefoxProfileDir?: string;
+  csrfToken?: string;
+  cookieHeader?: string;
+  onProgress?: (status: SyncProgress) => void;
 }
 
 function parseSnowflake(value?: string | null): bigint | null {
@@ -193,7 +213,7 @@ function buildUrl(cursor?: string, count = 20): string {
     variables: JSON.stringify(variables),
     features: JSON.stringify(GRAPHQL_FEATURES),
   });
-  return `https://x.com/i/api/graphql/${BOOKMARKS_QUERY_ID}/${BOOKMARKS_OPERATION}?${params}`;
+  return `${xGraphqlOrigin()}/i/api/graphql/${BOOKMARKS_QUERY_ID}/${BOOKMARKS_OPERATION}?${params}`;
 }
 
 function buildHeaders(csrfToken: string, cookieHeader?: string): Record<string, string> {
@@ -737,6 +757,93 @@ export async function syncBookmarksGraphQL(
     stopReason,
     cachePath,
     statePath,
+  };
+}
+
+export async function fetchRemoteBookmarkIds(options: RemoteBookmarkIdsOptions = {}): Promise<RemoteBookmarkIdsResult> {
+  const maxPages = options.maxPages ?? 500;
+  const delayMs = options.delayMs ?? 600;
+  const maxMinutes = options.maxMinutes ?? 30;
+  const pageSize = Math.max(1, Math.min(options.pageSize ?? 20, 100));
+
+  let csrfToken: string;
+  let cookieHeader: string | undefined;
+
+  if (options.csrfToken) {
+    csrfToken = options.csrfToken;
+    cookieHeader = options.cookieHeader;
+  } else {
+    const config = loadChromeSessionConfig({ browserId: options.browser });
+
+    if (config.browser.cookieBackend === 'firefox') {
+      const cookies = extractFirefoxXCookies(options.firefoxProfileDir);
+      csrfToken = cookies.csrfToken;
+      cookieHeader = cookies.cookieHeader;
+    } else {
+      const chromeDir = options.chromeUserDataDir ?? config.chromeUserDataDir;
+      const chromeProfile = options.chromeProfileDirectory ?? config.chromeProfileDirectory;
+      const cookies = extractChromeXCookies(chromeDir, chromeProfile, config.browser);
+      csrfToken = cookies.csrfToken;
+      cookieHeader = cookies.cookieHeader;
+    }
+  }
+
+  const started = Date.now();
+  let page = 0;
+  let cursor: string | undefined;
+  let stopReason = 'unknown';
+  const ids = new Set<string>();
+
+  while (page < maxPages) {
+    if (Date.now() - started > maxMinutes * 60_000) {
+      stopReason = 'max runtime reached';
+      break;
+    }
+
+    const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize);
+    page += 1;
+
+    if (result.records.length === 0) {
+      stopReason = 'end of bookmarks';
+      break;
+    }
+
+    for (const record of result.records) {
+      ids.add(record.tweetId);
+    }
+
+    options.onProgress?.({
+      page,
+      totalFetched: ids.size,
+      newAdded: ids.size,
+      running: true,
+      done: false,
+    });
+
+    if (!result.nextCursor) {
+      stopReason = 'end of bookmarks';
+      break;
+    }
+
+    cursor = result.nextCursor;
+    if (page < maxPages) await new Promise((r) => setTimeout(r, delayMs));
+  }
+
+  if (stopReason === 'unknown') stopReason = page >= maxPages ? 'max pages reached' : 'unknown';
+
+  options.onProgress?.({
+    page,
+    totalFetched: ids.size,
+    newAdded: ids.size,
+    running: false,
+    done: true,
+    stopReason,
+  });
+
+  return {
+    ids: Array.from(ids),
+    pages: page,
+    stopReason,
   };
 }
 

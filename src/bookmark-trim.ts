@@ -1,5 +1,6 @@
 import { removeBookmarksFromArchive } from './archive-actions.js';
 import { readJsonLines } from './fs.js';
+import { fetchRemoteBookmarkIds, type RemoteBookmarkIdsOptions } from './graphql-bookmarks.js';
 import { RemoteTweetActionError, unbookmarkTweet } from './graphql-actions.js';
 import { twitterBookmarksCachePath } from './paths.js';
 import type { BookmarkRecord } from './types.js';
@@ -45,6 +46,28 @@ export interface TrimBookmarksResult {
   firstRemovedId?: string;
   cachePath?: string;
   dbPath?: string;
+}
+
+export interface BookmarksRemotePruneProgress {
+  phase: 'fetch-remote' | 'rewrite-local';
+  page?: number;
+  remoteCount?: number;
+}
+
+export interface PruneLocalBookmarksMissingRemotelyOptions extends RemoteBookmarkIdsOptions {
+  onProgress?: (progress: BookmarksRemotePruneProgress) => void;
+}
+
+export interface PruneLocalBookmarksMissingRemotelyResult {
+  localBefore: number;
+  remoteCount: number;
+  removed: number;
+  localAfter: number;
+  removedIds: string[];
+  missingIds: string[];
+  cachePath?: string;
+  dbPath?: string;
+  stopReason: string;
 }
 
 export class BookmarkTrimRateLimitError extends Error {
@@ -190,5 +213,55 @@ export async function trimBookmarks(options: TrimBookmarksOptions): Promise<Trim
     firstRemovedId: plan.firstRemoveId,
     cachePath: lastArchiveState?.cachePath,
     dbPath: lastArchiveState?.dbPath,
+  };
+}
+
+export async function pruneLocalBookmarksMissingRemotely(
+  options: PruneLocalBookmarksMissingRemotelyOptions = {},
+): Promise<PruneLocalBookmarksMissingRemotelyResult> {
+  const local = await readJsonLines<BookmarkRecord>(twitterBookmarksCachePath());
+
+  options.onProgress?.({ phase: 'fetch-remote', page: 0, remoteCount: 0 });
+  const remote = await fetchRemoteBookmarkIds({
+    ...options,
+    onProgress: (progress) => {
+      options.onProgress?.({
+        phase: 'fetch-remote',
+        page: progress.page,
+        remoteCount: progress.totalFetched,
+      });
+    },
+  });
+
+  const remoteIds = new Set(remote.ids);
+  const removalIds = local
+    .filter((record) => !remoteIds.has(record.tweetId))
+    .map((record) => record.tweetId);
+
+  if (removalIds.length === 0) {
+    return {
+      localBefore: local.length,
+      remoteCount: remote.ids.length,
+      removed: 0,
+      localAfter: local.length,
+      removedIds: [],
+      missingIds: [],
+      stopReason: remote.stopReason,
+    };
+  }
+
+  options.onProgress?.({ phase: 'rewrite-local', remoteCount: remote.ids.length });
+  const rewritten = await removeBookmarksFromArchive(removalIds);
+
+  return {
+    localBefore: local.length,
+    remoteCount: remote.ids.length,
+    removed: rewritten.removedIds.length,
+    localAfter: rewritten.totalRemaining,
+    removedIds: rewritten.removedIds,
+    missingIds: rewritten.missingIds,
+    cachePath: rewritten.cachePath,
+    dbPath: rewritten.dbPath,
+    stopReason: remote.stopReason,
   };
 }
