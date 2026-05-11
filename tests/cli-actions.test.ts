@@ -767,6 +767,149 @@ test('ft likes prune-remote-missing deletes only local likes absent from remote 
   }
 });
 
+test('ft bookmarks prune-remote-missing deletes only local bookmarks absent from remote and does not write to X', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'ft-cli-prune-remote-bookmarks-'));
+  process.env.FT_DATA_DIR = dir;
+
+  const bookmarks = [
+    {
+      ...BOOKMARK_FIXTURE,
+      id: 'b3',
+      tweetId: 'b3',
+      bookmarkedAt: '2026-03-05T00:00:00Z',
+      url: 'https://x.com/alice/status/b3',
+      text: 'Still on remote',
+    },
+    {
+      ...BOOKMARK_FIXTURE,
+      id: 'b2',
+      tweetId: 'b2',
+      bookmarkedAt: '2026-03-04T00:00:00Z',
+      url: 'https://x.com/alice/status/b2',
+      text: 'Still on remote too',
+    },
+    {
+      ...BOOKMARK_FIXTURE,
+      id: 'b1',
+      tweetId: 'b1',
+      bookmarkedAt: '2026-03-03T00:00:00Z',
+      url: 'https://x.com/alice/status/b1',
+      text: 'Only local',
+    },
+  ];
+
+  const requests: string[] = [];
+  const remoteBookmarkedTweet = (id: string, text: string) => ({
+    rest_id: id,
+    legacy: {
+      id_str: id,
+      full_text: text,
+      created_at: 'Tue Mar 10 12:00:00 +0000 2026',
+      entities: { urls: [] },
+      extended_entities: { media: [] },
+    },
+    core: {
+      user_results: {
+        result: {
+          rest_id: 'alice-1',
+          core: {
+            screen_name: 'alice',
+            name: 'Alice',
+          },
+          legacy: {
+            profile_image_url_https: 'https://img.example.com/alice.jpg',
+          },
+        },
+      },
+    },
+  });
+  const server = http.createServer((_req, res) => {
+    requests.push(_req.url ?? '');
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      data: {
+        bookmark_timeline_v2: {
+          timeline: {
+            instructions: [
+              {
+                type: 'TimelineAddEntries',
+                entries: [
+                  {
+                    entryId: 'tweet-b3',
+                    sortIndex: '2041895058709413888',
+                    content: {
+                      itemContent: {
+                        itemType: 'TimelineTweet',
+                        tweet_results: {
+                          result: remoteBookmarkedTweet('b3', 'Still on remote'),
+                        },
+                      },
+                    },
+                  },
+                  {
+                    entryId: 'tweet-b2',
+                    sortIndex: '2041895058709413887',
+                    content: {
+                      itemContent: {
+                        itemType: 'TimelineTweet',
+                        tweet_results: {
+                          result: remoteBookmarkedTweet('b2', 'Still on remote too'),
+                        },
+                      },
+                    },
+                  },
+                  {
+                    entryId: 'cursor-bottom',
+                    sortIndex: '1',
+                    content: {
+                      cursorType: 'Bottom',
+                      value: '',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    }));
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Failed to bind mock prune server.');
+
+  try {
+    await writeFile(path.join(dir, 'bookmarks.jsonl'), bookmarks.map((row) => JSON.stringify(row)).join('\n') + '\n');
+    await writeJson(path.join(dir, 'bookmarks-meta.json'), {
+      provider: 'twitter',
+      schemaVersion: 1,
+      totalBookmarks: 3,
+    });
+    await buildIndex({ force: true });
+
+    const tsx = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+    const { stdout } = await execFileAsync(
+      tsx,
+      ['src/cli.ts', 'bookmarks', 'prune-remote-missing', '--max-pages', '5', '--delay-ms', '0', '--cookies', 'ct0-token', 'auth'],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, FT_DATA_DIR: dir, FT_X_API_ORIGIN: `http://127.0.0.1:${address.port}` },
+      },
+    );
+
+    assert.match(stdout, /Removed 1 local bookmarks missing from remote/);
+    assert.ok(await getBookmarkById('b3'));
+    assert.ok(await getBookmarkById('b2'));
+    assert.equal(await getBookmarkById('b1'), null);
+    assert.equal(requests.some((url) => url.includes('DeleteBookmark')), false);
+  } finally {
+    delete process.env.FT_DATA_DIR;
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('ft likes unlike retries a transient 500 before succeeding', async () => {
   await withCliDataDir(async (dir) => {
     let requests = 0;
