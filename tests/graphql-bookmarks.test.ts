@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildBookmarksUrl,
   convertTweetToArchiveItem,
   convertTweetToRecord,
   emitBookmarkArchiveItem,
+  fetchTweetWithFallback,
   parseBookmarksResponse,
   sanitizeBookmarkedAt,
   scoreRecord,
@@ -14,6 +16,15 @@ import {
 import type { BookmarkRecord } from '../src/types.js';
 
 const NOW = '2026-03-28T00:00:00.000Z';
+
+test('buildBookmarksUrl: includes article field toggles for long-form content', () => {
+  const url = new URL(buildBookmarksUrl('cursor-1', 20));
+  const fieldToggles = JSON.parse(url.searchParams.get('fieldToggles') ?? '{}');
+
+  assert.equal(fieldToggles.withArticleRichContentState, true);
+  assert.equal(fieldToggles.withArticleSummaryText, true);
+  assert.equal(fieldToggles.withArticlePlainText, true);
+});
 
 function makeTweetResult(overrides: Record<string, any> = {}) {
   return {
@@ -236,6 +247,207 @@ test('convertTweetToRecord: prefers note tweet text for articles/long-form', () 
   const result = convertTweetToRecord(tr, NOW);
   assert.ok(result);
   assert.equal(result.text, 'This is the full article text that would normally be truncated in legacy.full_text');
+});
+
+test('convertTweetToRecord: prefers article plain text over link shell', () => {
+  const tr = makeTweetResult({
+    legacy: {
+      full_text: 'https://t.co/mOWzTN0DqO',
+      entities: {
+        urls: [{ expanded_url: 'https://x.com/i/article/2058511841685557248', url: 'https://t.co/mOWzTN0DqO' }],
+      },
+    },
+    tweet: {
+      article: {
+        plain_text: 'Full X Article body from article plain text field.',
+      },
+    },
+  });
+  const result = convertTweetToRecord(tr, NOW);
+  assert.ok(result);
+  assert.equal(result.text, 'Full X Article body from article plain text field.');
+});
+
+test('fetchTweetWithFallback: returns syndication snapshot for a normal tweet without GraphQL retry', async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async (input: RequestInfo | URL) => {
+    fetchCalls += 1;
+    assert.match(String(input), /tweet-result/);
+    return new Response(JSON.stringify({
+      id_str: '1234567890',
+      text: 'Normal tweet with terminal punctuation.',
+      created_at: '2026-03-01T00:00:00Z',
+      user: { screen_name: 'direct', name: 'Direct User', profile_image_url_https: 'https://img.example.com/direct.jpg' },
+      mediaDetails: [],
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    const result = await fetchTweetWithFallback('1234567890');
+    assert.equal(fetchCalls, 1);
+    assert.equal(result.status, 'ok');
+    assert.equal(result.snapshot?.text, 'Normal tweet with terminal punctuation.');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchTweetWithFallback: retries via TweetDetail when syndication marks a note tweet', async () => {
+  const originalFetch = globalThis.fetch;
+  const seenUrls: string[] = [];
+  globalThis.fetch = async (input: RequestInfo | URL) => {
+    const url = String(input);
+    seenUrls.push(url);
+    if (url.includes('/tweet-result')) {
+      return new Response(JSON.stringify({
+        id_str: '1234567890',
+        text: 'This is truncated long-form text',
+        note_tweet: { id: 'note' },
+        created_at: '2026-03-01T00:00:00Z',
+        user: { screen_name: 'direct', name: 'Direct User', profile_image_url_https: 'https://img.example.com/direct.jpg' },
+        mediaDetails: [],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+
+    assert.match(url, /\/i\/api\/graphql\/.+\/TweetDetail/);
+    return new Response(JSON.stringify({
+      data: {
+        threaded_conversation_with_injections_v2: {
+          instructions: [{
+            entries: [{
+              content: {
+                itemContent: {
+                  tweet_results: {
+                    result: makeTweetResult({
+                      rest_id: '1234567890',
+                      legacy: {
+                        ...makeTweetResult().legacy,
+                        id_str: '1234567890',
+                        full_text: 'Ignored truncated text',
+                      },
+                      tweet: {
+                        note_tweet: {
+                          note_tweet_results: {
+                            result: { text: 'Full note tweet body returned from TweetDetail.' },
+                          },
+                        },
+                      },
+                    }),
+                  },
+                },
+              },
+            }],
+          }],
+        },
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    const result = await fetchTweetWithFallback('1234567890', {
+      csrfToken: 'ct0',
+      cookieHeader: 'ct0=ct0; auth_token=auth',
+    });
+    assert.equal(result.snapshot?.text, 'Full note tweet body returned from TweetDetail.');
+    assert.equal(result.snapshot?.authorHandle, 'testuser');
+    assert.ok(seenUrls.some((url) => url.includes('/tweet-result')));
+    assert.ok(seenUrls.some((url) => /\/i\/api\/graphql\/.+\/TweetDetail/.test(url)));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchTweetWithFallback: preserves syndication result when TweetDetail fails', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/tweet-result')) {
+      return new Response(JSON.stringify({
+        id_str: '1234567890',
+        text: 'This looks truncated and should trigger fallback',
+        note_tweet: { id: 'note' },
+        created_at: '2026-03-01T00:00:00Z',
+        user: { screen_name: 'direct', name: 'Direct User', profile_image_url_https: 'https://img.example.com/direct.jpg' },
+        mediaDetails: [],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+
+    return new Response('forbidden', { status: 403 });
+  };
+
+  try {
+    const result = await fetchTweetWithFallback('1234567890', {
+      csrfToken: 'ct0',
+      cookieHeader: 'ct0=ct0; auth_token=auth',
+    });
+    assert.equal(result.snapshot?.text, 'This looks truncated and should trigger fallback');
+    assert.equal(result.snapshot?.authorHandle, 'direct');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchTweetWithFallback: retries GraphQL for t.co article shells', async () => {
+  const originalFetch = globalThis.fetch;
+  const seenUrls: string[] = [];
+  globalThis.fetch = async (input: RequestInfo | URL) => {
+    const url = String(input);
+    seenUrls.push(url);
+    if (url.includes('/tweet-result')) {
+      return new Response(JSON.stringify({
+        id_str: '1234567890',
+        text: 'https://t.co/mOWzTN0DqO',
+        created_at: '2026-03-01T00:00:00Z',
+        user: { screen_name: 'direct', name: 'Direct User', profile_image_url_https: 'https://img.example.com/direct.jpg' },
+        mediaDetails: [],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+
+    return new Response(JSON.stringify({
+      data: {
+        threaded_conversation_with_injections_v2: {
+          instructions: [{
+            entries: [{
+              content: {
+                itemContent: {
+                  tweet_results: {
+                    result: makeTweetResult({
+                      rest_id: '1234567890',
+                      legacy: {
+                        ...makeTweetResult().legacy,
+                        id_str: '1234567890',
+                        full_text: 'https://t.co/mOWzTN0DqO',
+                        entities: {
+                          urls: [{ expanded_url: 'https://x.com/i/article/2058511841685557248', url: 'https://t.co/mOWzTN0DqO' }],
+                        },
+                      },
+                      tweet: {
+                        article: {
+                          plain_text: 'Expanded article body from TweetDetail.',
+                        },
+                      },
+                    }),
+                  },
+                },
+              },
+            }],
+          }],
+        },
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    const result = await fetchTweetWithFallback('1234567890', {
+      csrfToken: 'ct0',
+      cookieHeader: 'ct0=ct0; auth_token=auth',
+    });
+    assert.equal(result.snapshot?.text, 'Expanded article body from TweetDetail.');
+    assert.ok(seenUrls.some((url) => /\/i\/api\/graphql\/.+\/TweetDetail/.test(url)));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('convertTweetToRecord: falls back to legacy text when no note tweet', () => {

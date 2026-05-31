@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compareVersions, extractTweetId, runWithSpinner } from '../src/cli.js';
+import { compareVersions, extractTweetId, runWithSpinner, buildCli } from '../src/cli.js';
 
 test('compareVersions: equal versions return 0', () => {
   assert.equal(compareVersions('1.2.3', '1.2.3'), 0);
@@ -74,4 +74,24 @@ test('extractTweetId: extracts ids from Twitter status URLs', () => {
 
 test('extractTweetId: rejects invalid inputs', () => {
   assert.throws(() => extractTweetId('https://x.com/jukan05'), /Invalid tweet id or URL/);
+});
+
+test('tweet search rejects invalid filter values', async () => {
+  const cli = buildCli();
+  const originalExitCode = process.exitCode;
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = (...args: unknown[]) => {
+    errors.push(args.map(String).join(' '));
+  };
+
+  try {
+    process.exitCode = 0;
+    await cli.parseAsync(['node', 'ft', 'tweet', 'search', 'mlcc', '--filter', 'latest'], { from: 'node' });
+    assert.equal(process.exitCode, 1);
+    assert.match(errors.join('\n'), /Invalid tweet search filter/i);
+  } finally {
+    process.exitCode = originalExitCode;
+    console.error = originalError;
+  }
 });

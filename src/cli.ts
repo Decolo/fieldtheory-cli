@@ -11,11 +11,13 @@ import { syncAccountTimelineGraphQL } from './graphql-account-timeline.js';
 import { syncFeedConversationContext } from './feed-context.js';
 import { bookmarkTweet, likeTweet, unlikeTweet, unbookmarkTweet } from './graphql-actions.js';
 import {
+  fetchTweetWithFallback,
   fetchBookmarkRecordViaSyndication,
   fetchTweetViaSyndication,
   type SyncProgress,
   type GapFillProgress,
 } from './graphql-bookmarks.js';
+import type { RemoteTweetSearchResultItem } from './twitter-search.js';
 import { syncBookmarks } from './bookmark-sync.js';
 import { repairBookmarks } from './bookmark-repair.js';
 import { repairLikes } from './like-repair.js';
@@ -126,6 +128,7 @@ import {
   normalizeLikeCurationDecision,
   normalizeLikeCurationSignals,
 } from './like-curation-types.js';
+import { searchRemoteTweets } from './twitter-search.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -250,6 +253,19 @@ function formatSyndicatedTweet(snapshot: NonNullable<Awaited<ReturnType<typeof f
     lines.push(...snapshot.media.map((url) => `  ${url}`));
   }
   return lines.join('\n');
+}
+
+function formatRemoteTweetSearchResults(items: RemoteTweetSearchResultItem[]): string {
+  if (items.length === 0) return 'No remote tweet results found.';
+
+  return items.map((item, index) => {
+    const header = `${index + 1}. ${item.authorHandle ? `@${item.authorHandle}` : '@?'}  ${item.postedAt?.slice(0, 16) ?? '?'}  [${item.status}]`;
+    const body = item.text
+      ? `   ${item.text.replace(/\s+/g, ' ').slice(0, 280)}${item.text.length > 280 ? '...' : ''}`
+      : '   Tweet text unavailable';
+    const link = `   ${item.url}`;
+    return [header, body, link].join('\n');
+  }).join('\n\n');
 }
 
 function formatHybridSearchResults(results: HybridSearchResult[], mode: HybridSearchMode): string {
@@ -716,6 +732,12 @@ export function parseIntervalMs(raw: string): number {
   return amount * 60 * 60 * 1000;
 }
 
+function normalizeTweetSearchFilter(raw: string): 'top' | 'live' {
+  const value = String(raw).trim().toLowerCase();
+  if (value === 'top' || value === 'live') return value;
+  throw new Error(`Invalid tweet search filter: "${raw}". Use "top" or "live".`);
+}
+
 async function waitForNextRun(intervalMs: number): Promise<boolean> {
   return await new Promise<boolean>((resolve) => {
     const timer = setTimeout(() => {
@@ -864,7 +886,7 @@ export function buildCli() {
     .option('--json', 'JSON output')
     .action(safe(async (input: string, options) => {
       const tweetId = extractTweetId(input);
-      const result = await fetchTweetViaSyndication(tweetId);
+      const result = await fetchTweetWithFallback(tweetId);
       if (!result.snapshot) {
         const suffix = result.httpStatus ? ` (${result.httpStatus})` : '';
         console.log(`  Tweet unavailable: ${tweetId} [${result.status}${suffix}]`);
@@ -878,6 +900,26 @@ export function buildCli() {
       }
 
       console.log(formatSyndicatedTweet(result.snapshot));
+    }));
+
+  tweet
+    .command('search')
+    .description('Search remote X/Twitter posts')
+    .argument('<query>', 'Search query')
+    .option('--limit <n>', 'Max remote results', (v: string) => Number(v), 15)
+    .option('--filter <mode>', 'Remote search mode: top or live', 'top')
+    .option('--json', 'JSON output')
+    .action(safe(async (query: string, options) => {
+      const results = await searchRemoteTweets({
+        query,
+        limit: Number(options.limit) || 15,
+        filter: normalizeTweetSearchFilter(String(options.filter ?? 'top')),
+      });
+      if (options.json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+      console.log(formatRemoteTweetSearchResults(results));
     }));
 
   // ── bookmarks ───────────────────────────────────────────────────────────
